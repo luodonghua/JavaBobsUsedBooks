@@ -1,0 +1,39 @@
+
+### Oracle Versions
+
+1. schema_oracle.sql
+   • Created Oracle-compatible version with:
+     • Sequences and triggers for ID generation
+     • NUMBER(1) for boolean fields (0=false, 1=true)
+     • CLOB for text fields
+     • Explicit foreign key constraints
+     • Oracle-compatible timestamp handling
+
+2. data_oracle.sql
+   • Oracle-compatible data insertion with:
+     • "SELECT ... FROM dual WHERE NOT EXISTS" pattern for upsert functionality
+     • Oracle date formatting
+     • Numeric values for boolean fields
+
+3. application-oracle.properties
+   • Created a configuration file for Oracle deployment
+   • Set appropriate Oracle dialect
+   • Configured SQL initialization to use Oracle scripts
+   • Adjusted logging levels for production
+   • Disabled development features
+
+### How to Use These Files
+
+1. For PostgreSQL (Development):
+   • Add spring.sql.init.mode=always to your application.properties if you want to use schema.sql and data.sql
+   • Change spring.jpa.hibernate.ddl-auto=validate to prevent Hibernate from modifying the schema
+
+2. For Oracle (Production):
+   • Use the application-oracle.properties file by running with the Oracle profile:
+
+     java -jar your-app.jar --spring.profiles.active=oracle
+
+   • Update the Oracle connection details in application-oracle.properties
+   • Make sure the Oracle JDBC driver is in your classpath
+
+These updated files ensure that your database schema is consistent across environments and provide a smooth path to deploying in your Oracle production environment.

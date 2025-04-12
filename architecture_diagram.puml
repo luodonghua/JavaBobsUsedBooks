@@ -1,0 +1,136 @@
+@startuml Bob's Used Books Architecture
+
+' Define styles
+skinparam componentStyle rectangle
+skinparam backgroundColor white
+skinparam ArrowColor #333333
+skinparam ComponentBackgroundColor #F0F8FF
+skinparam DatabaseBackgroundColor #F5F5DC
+skinparam InterfaceBackgroundColor #E6E6FA
+skinparam ActorBackgroundColor #FAFAD2
+
+' Define actors
+actor "Customer" as customer
+actor "Admin" as admin
+
+' Define external systems
+cloud "Email Service" as emailService
+
+' Define frontend components
+package "Frontend" {
+  component "Thymeleaf Templates" as thymeleaf
+  component "Static Resources" as staticRes
+}
+
+' Define application layers
+package "Controllers" {
+  component "Web Controllers" as webControllers {
+    component "Book Controller" as bookController
+    component "Cart Controller" as cartController
+    component "Order Controller" as orderController
+    component "Customer Controller" as customerController
+    component "Sell Controller" as sellController
+    component "Search Controller" as searchController
+    component "Auth Controller" as authController
+  }
+  
+  component "Admin Controllers" as adminControllers {
+    component "Admin Controller" as adminController
+    component "Book Admin Controller" as bookAdminController
+    component "Reference Data Controller" as refDataController
+    component "Report Controller" as reportController
+  }
+  
+  component "REST API Controllers" as apiControllers {
+    component "REST Shopping Cart Controller" as restCartController
+    component "REST Offers Controller" as restOffersController
+  }
+}
+
+package "Services" {
+  component "Book Service" as bookService
+  component "Shopping Cart Service" as cartService
+  component "Order Service" as orderService
+  component "Customer Service" as customerService
+  component "Offer Service" as offerService
+  component "Reference Data Service" as refDataService
+  component "Report Service" as reportService
+  component "User Service" as userService
+  component "Password Reset Service" as passwordService
+  component "Email Service" as emailServiceComp
+}
+
+package "Security" {
+  component "Security Config" as securityConfig
+  component "Admin Security Config" as adminSecurityConfig
+  component "Custom User Details Service" as userDetailsService
+}
+
+package "Data Access" {
+  component "Repositories" as repositories {
+    component "Book Repository" as bookRepo
+    component "Shopping Cart Repository" as cartRepo
+    component "Order Repository" as orderRepo
+    component "Customer Repository" as customerRepo
+    component "Offer Repository" as offerRepo
+    component "Reference Data Repository" as refDataRepo
+  }
+  
+  component "Mappers" as mappers {
+    component "Book Mapper" as bookMapper
+    component "Order Mapper" as orderMapper
+    component "Customer Mapper" as customerMapper
+    component "Reference Data Mapper" as refDataMapper
+  }
+  
+  component "DTOs" as dtos
+  component "Entities" as entities
+}
+
+database "Database" as db {
+  component "PostgreSQL (Dev)" as postgres
+  component "Oracle (Prod)" as oracle
+}
+
+' Define relationships
+customer --> thymeleaf : interacts with
+admin --> thymeleaf : manages via
+
+thymeleaf --> webControllers : requests
+thymeleaf --> adminControllers : admin requests
+thymeleaf <-- webControllers : responses
+thymeleaf <-- adminControllers : admin responses
+
+webControllers --> services : uses
+adminControllers --> services : uses
+apiControllers --> services : uses
+
+services --> repositories : uses
+services --> mappers : uses
+repositories --> entities : manages
+repositories --> db : persists
+mappers --> entities : maps from
+mappers --> dtos : maps to
+services --> dtos : uses
+
+securityConfig --> userDetailsService : uses
+adminSecurityConfig --> userDetailsService : uses
+userDetailsService --> repositories : uses
+
+emailServiceComp --> emailService : sends emails
+
+' Core functional flows
+customer --> bookController : browses books
+customer --> cartController : manages cart
+customer --> orderController : places orders
+customer --> sellController : submits offers
+customer --> searchController : searches inventory
+customer --> customerController : manages profile
+customer --> authController : authenticates
+
+admin --> bookAdminController : manages inventory
+admin --> refDataController : manages reference data
+admin --> reportController : generates reports
+admin --> adminController : manages system
+
+@enduml

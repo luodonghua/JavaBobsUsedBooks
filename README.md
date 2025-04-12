@@ -9,7 +9,7 @@ This project is a Java Spring Boot implementation converted from an original ASP
 ## Technology Stack
 
 - **Backend**: Java 17, Spring Boot 3.1.5
-- **Database**: PostgreSQL (development), Oracle (production)
+- **Database**: Oracle (production)
 - **ORM**: Spring Data JPA/Hibernate
 - **Frontend**: Thymeleaf templates (server-side rendering)
 - **Build Tool**: Maven
@@ -61,27 +61,25 @@ Manage genres, publishers, book types, and condition categories.
 
 ## Database Configuration
 
-### Development (PostgreSQL)
-```
-URL: jdbc:postgresql://localhost:5432/bk2
-Username: donghual
-Password: password
-```
-
 ### Production (Oracle)
+
 The application includes Oracle-compatible schema and data scripts for production deployment.
+- src/main/resources/db/oracle/setup.sql
+- src/main/resources/db/oracle/schema_oracle.sql
+- src/main/resources/db/oracle/data_oracle_jpa.sql
+
 
 ## Running the Application
 
 1. Make sure you have Java 17 and Maven installed
-2. Create a PostgreSQL database named `bk2`
+2. Create a Oracle database `XEFREE1`
 3. Run the application using Maven:
 
 ```bash
 mvn spring-boot:run
 ```
 
-The application will be available at http://localhost:8080/
+The application will be available at http://localhost:8081/
 
 ## API Endpoints
 

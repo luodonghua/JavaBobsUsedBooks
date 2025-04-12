@@ -1,6 +1,6 @@
 #!/usr/bin/bash
 
-sudo dnf install -y java-17-amazon-corretto-devel-17 maven-amazon-corretto17 maven zip unzip
+sudo dnf install -y java-17-amazon-corretto maven-amazon-corretto17 maven zip unzip
 
 # zip -r ../JavaBobsUsedBooks.zip . -x "*.git*" -x setup.sh
 wget https://github.com/luodonghua/JavaBobsUsedBooks/raw/refs/heads/main/JavaBobsUsedBooks.zip 

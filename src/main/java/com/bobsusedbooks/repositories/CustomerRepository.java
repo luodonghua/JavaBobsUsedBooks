@@ -31,6 +31,6 @@ public interface CustomerRepository extends JpaRepository<Customer, Long> {
      * @param customerId The ID of the customer
      * @return List of CustomerHistoryDTO objects containing the customer's purchase history
      */
-    @Query(value = "{ ? = call get_customer_history(:customerId) }", nativeQuery = true)
+    @Query(value = "{ call get_customer_history(:customerId) }", nativeQuery = true)
     List<CustomerHistoryDTO> getCustomerPurchaseHistory(@Param("customerId") Long customerId);
 }

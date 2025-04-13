@@ -424,7 +424,8 @@ RETURN NUMBER
 IS
   v_count NUMBER;
 BEGIN
-  SELECT COUNT(*) INTO v_count
+  SELECT  /*+ FIRST_ROWS(10) */ 
+    COUNT(*) INTO v_count
   FROM BOOKS
   WHERE GENRE_ID = p_genre_id;
 
@@ -533,7 +534,7 @@ END;
 CREATE MATERIALIZED VIEW MV_CUSTOMER_ORDER_SUMMARY
 REFRESH ON DEMAND
 AS
-SELECT
+SELECT /*+ ORDERED */
   C.ID AS CUSTOMER_ID,
   C.FIRST_NAME,
   C.LAST_NAME,
@@ -559,8 +560,8 @@ BEGIN
   SELECT
     COUNT(*),
     NVL(SUM(TOTAL_AMOUNT), 0),
-    NVL(TRUNC(SYSDATE - MIN(CREATED_ON)), 0),
-    NVL(TRUNC(SYSDATE - MAX(CREATED_ON)), 999)
+    NVL(TRUNC(SYSDATE) - TRUNC(MIN(CREATED_ON)), 0),
+    NVL(TRUNC(SYSDATE) - TRUNC(MAX(CREATED_ON)), 999)
   INTO
     v_order_count,
     v_total_spent,
@@ -1411,12 +1412,19 @@ BEGIN
         AND O.ORDER_STATUS != 4  -- Exclude cancelled orders
       GROUP BY B.ID, B.NAME, B.AUTHOR, G.NAME, P.NAME
     ),
+    top_books AS (
+      SELECT
+        ms.*,
+        ROW_NUMBER() OVER (ORDER BY ms.QUANTITY_SOLD DESC) AS RN
+      FROM monthly_sales ms
+    ),
     genre_sales AS (
       SELECT
         G.NAME AS GENRE,
         COUNT(DISTINCT B.ID) AS UNIQUE_BOOKS_SOLD,
         SUM(OI.QUANTITY) AS QUANTITY_SOLD,
-        SUM(OI.BOOK_PRICE * OI.QUANTITY - NVL(OI.DISCOUNT, 0)) AS NET_REVENUE
+        SUM(OI.BOOK_PRICE * OI.QUANTITY - NVL(OI.DISCOUNT, 0)) AS NET_REVENUE,
+        ROW_NUMBER() OVER (ORDER BY SUM(OI.BOOK_PRICE * OI.QUANTITY - NVL(OI.DISCOUNT, 0)) DESC) AS RN_REVENUE
       FROM GENRES G
       JOIN BOOKS B ON G.ID = B.GENRE_ID
       JOIN ORDER_ITEMS OI ON B.ID = OI.BOOK_ID
@@ -1429,13 +1437,17 @@ BEGIN
       SELECT
         TRUNC(O.CREATED_ON) AS SALE_DATE,
         COUNT(DISTINCT O.ID) AS ORDER_COUNT,
-        SUM(O.TOTAL_AMOUNT) AS DAILY_REVENUE
+        SUM(O.TOTAL_AMOUNT) AS DAILY_REVENUE,
+        ROW_NUMBER() OVER (ORDER BY TRUNC(O.CREATED_ON)) AS RN_DATE
       FROM ORDERS O
       WHERE O.CREATED_ON BETWEEN v_start_date AND v_end_date
         AND O.ORDER_STATUS != 4  -- Exclude cancelled orders
       GROUP BY TRUNC(O.CREATED_ON)
     )
+    -- Monthly Summary (Section 1)
     SELECT
+      1 AS SECTION_ORDER,
+      0 AS SUBSECTION_ORDER,
       'MONTHLY_SUMMARY' AS REPORT_SECTION,
       TO_CHAR(v_start_date, 'YYYY-MM') AS REPORT_PERIOD,
       COUNT(DISTINCT ms.BOOK_ID) AS UNIQUE_BOOKS_SOLD,
@@ -1455,23 +1467,28 @@ BEGIN
 
     UNION ALL
 
+    -- Top Books (Section 2)
     SELECT
+      2 AS SECTION_ORDER,
+      tb.RN AS SUBSECTION_ORDER,
       'TOP_BOOKS' AS REPORT_SECTION,
-      NULL AS REPORT_PERIOD,
+      tb.BOOK_TITLE AS REPORT_PERIOD,
       NULL AS UNIQUE_BOOKS_SOLD,
-      ms.QUANTITY_SOLD AS TOTAL_BOOKS_SOLD,
-      ms.GROSS_REVENUE,
-      ms.TOTAL_DISCOUNTS,
-      ms.NET_REVENUE,
+      tb.QUANTITY_SOLD AS TOTAL_BOOKS_SOLD,
+      tb.GROSS_REVENUE,
+      tb.TOTAL_DISCOUNTS,
+      tb.NET_REVENUE,
       NULL AS ORDER_COUNT,
       NULL AS CUSTOMER_COUNT
-    FROM monthly_sales ms
-    ORDER BY ms.QUANTITY_SOLD DESC
-    FETCH FIRST 10 ROWS ONLY
+    FROM top_books tb
+    WHERE RN <= 10
 
     UNION ALL
 
+    -- Genre Performance (Section 3)
     SELECT
+      3 AS SECTION_ORDER,
+      gs.RN_REVENUE AS SUBSECTION_ORDER,
       'GENRE_PERFORMANCE' AS REPORT_SECTION,
       gs.GENRE AS REPORT_PERIOD,
       gs.UNIQUE_BOOKS_SOLD,
@@ -1482,11 +1499,13 @@ BEGIN
       NULL AS ORDER_COUNT,
       NULL AS CUSTOMER_COUNT
     FROM genre_sales gs
-    ORDER BY gs.NET_REVENUE DESC
 
     UNION ALL
 
+    -- Daily Sales (Section 4)
     SELECT
+      4 AS SECTION_ORDER,
+      ds.RN_DATE AS SUBSECTION_ORDER,
       'DAILY_SALES' AS REPORT_SECTION,
       TO_CHAR(ds.SALE_DATE, 'YYYY-MM-DD') AS REPORT_PERIOD,
       NULL AS UNIQUE_BOOKS_SOLD,
@@ -1497,7 +1516,7 @@ BEGIN
       ds.ORDER_COUNT,
       NULL AS CUSTOMER_COUNT
     FROM daily_sales ds
-    ORDER BY ds.SALE_DATE;
+    ORDER BY SECTION_ORDER, SUBSECTION_ORDER;
 END;
 /
 
@@ -1838,3 +1857,237 @@ CREATE OR REPLACE PACKAGE BODY book_analytics AS
   END generate_revenue_forecast;
 END book_analytics;
 /
+
+
+
+-- Demostrate Oracle Specific Features
+
+-- Example 1: Oracle PRAGMA AUTONOMOUS_TRANSACTION
+-- This feature allows a PL/SQL block to have its own independent transaction
+
+CREATE OR REPLACE PROCEDURE update_book_quantity(
+  p_book_id IN NUMBER,
+  p_quantity_change IN NUMBER
+) AS
+  PRAGMA AUTONOMOUS_TRANSACTION;
+  v_current_quantity NUMBER;
+BEGIN
+  -- Get current quantity
+  SELECT QUANTITY INTO v_current_quantity 
+  FROM BOOKS 
+  WHERE ID = p_book_id;
+  
+  -- Update the quantity
+  UPDATE BOOKS 
+  SET QUANTITY = v_current_quantity + p_quantity_change,
+      UPDATED_ON = SYSTIMESTAMP
+  WHERE ID = p_book_id;
+  
+  -- Commit the autonomous transaction
+  COMMIT;
+EXCEPTION
+  WHEN OTHERS THEN
+    -- Rollback only affects this autonomous transaction
+    ROLLBACK;
+    RAISE;
+END update_book_quantity;
+/
+
+-- Example 2: Oracle Database Links
+-- Database links allow access to objects in remote databases
+
+-- Create a database link to a remote Oracle database
+CREATE DATABASE LINK remote_bookstore
+CONNECT TO demo IDENTIFIED BY "Welcome123_"
+USING '(DESCRIPTION=
+         (ADDRESS=(PROTOCOL=TCP)(HOST=localhost)(PORT=1521))
+         (CONNECT_DATA=(SERVICE_NAME=XEPDB1)))';
+
+CREATE SYNONYM remote_books FOR BOOKS@remote_bookstore;
+
+-- Example 3: Oracle-specific syntax (DBMS_OUTPUT.PUT_LINE and DBMS_LOCK)
+
+CREATE OR REPLACE FUNCTION check_book_availability(
+  p_book_id IN NUMBER,
+  p_quantity IN NUMBER
+) RETURN BOOLEAN AS
+  v_available_quantity NUMBER;
+  v_book_name VARCHAR2(255);
+BEGIN
+  -- Get book information
+  SELECT NAME, QUANTITY INTO v_book_name, v_available_quantity
+  FROM BOOKS
+  WHERE ID = p_book_id;
+  
+  -- Log the check
+  DBMS_OUTPUT.PUT_LINE('Checking availability for book: ' || v_book_name);
+  DBMS_OUTPUT.PUT_LINE('Requested quantity: ' || p_quantity);
+  DBMS_OUTPUT.PUT_LINE('Available quantity: ' || v_available_quantity);
+  
+  -- Simulate a delay for inventory verification
+  DBMS_OUTPUT.PUT_LINE('Verifying inventory...');
+  DBMS_LOCK.SLEEP(1);
+  
+  -- Check if enough quantity is available
+  IF v_available_quantity >= p_quantity THEN
+    DBMS_OUTPUT.PUT_LINE('Book is available in requested quantity');
+    RETURN TRUE;
+  ELSE
+    DBMS_OUTPUT.PUT_LINE('Insufficient quantity available');
+    RETURN FALSE;
+  END IF;
+EXCEPTION
+  WHEN NO_DATA_FOUND THEN
+    DBMS_OUTPUT.PUT_LINE('Book with ID ' || p_book_id || ' not found');
+    RETURN FALSE;
+  WHEN OTHERS THEN
+    DBMS_OUTPUT.PUT_LINE('Error: ' || SQLERRM);
+    RETURN FALSE;
+END check_book_availability;
+/
+
+
+-- Example 4: Oracle Synonyms
+-- Synonyms provide alternative names for database objects
+
+CREATE PUBLIC SYNONYM GENRES FOR GENRES;
+CREATE PUBLIC SYNONYM BOOK_TYPES FOR BOOK_TYPES;
+CREATE PUBLIC SYNONYM CONDITIONS FOR CONDITIONS;
+CREATE PUBLIC SYNONYM PUBLISHERS FOR PUBLISHERS;
+CREATE PUBLIC SYNONYM BOOKS FOR BOOKS;
+CREATE PUBLIC SYNONYM ORDERS FOR ORDERS;
+CREATE PUBLIC SYNONYM ORDER_ITEMS FOR ORDER_ITEMS;
+CREATE PUBLIC SYNONYM CUSTOMERS FOR CUSTOMERS;
+-- Private Synonym
+CREATE SYNONYM CLIENT_LISTS FOR CUSTOMERS;
+
+-- Example 5: Oracle BLOB for storing book cover images
+
+-- Create a separate table for book cover images
+CREATE TABLE BOOKS_COVER (
+  BOOK_ID NUMBER(19,0) PRIMARY KEY,
+  COVER_IMAGE BLOB,
+  CREATED_ON TIMESTAMP(6),
+  UPDATED_ON TIMESTAMP(6),
+  CONSTRAINT FK_BOOKS_COVER_BOOK FOREIGN KEY (BOOK_ID) REFERENCES BOOKS(ID)
+);
+
+-- Create Oracle directory object for image files
+-- Note: This requires appropriate privileges
+CREATE OR REPLACE DIRECTORY BOOK_IMAGES_DIR AS '/path/to/book/images';
+
+-- PL/SQL procedure to load book cover image from a file
+CREATE OR REPLACE PROCEDURE load_book_cover_image(
+  p_book_id IN NUMBER,
+  p_image_dir IN VARCHAR2,
+  p_file_name IN VARCHAR2
+) AS
+  v_blob BLOB;
+  v_bfile BFILE;
+  v_dest_offset INTEGER := 1;
+  v_src_offset INTEGER := 1;
+  v_exists NUMBER;
+  v_cover_exists NUMBER;
+BEGIN
+  -- Check if book exists
+  SELECT COUNT(*) INTO v_exists
+  FROM BOOKS
+  WHERE ID = p_book_id;
+
+  IF v_exists = 0 THEN
+    RAISE_APPLICATION_ERROR(-20001, 'Book ID ' || p_book_id || ' does not exist');
+  END IF;
+
+  -- Initialize BFILE locator to the source file
+  v_bfile := BFILENAME(p_image_dir, p_file_name);
+
+  -- Check if file exists
+  IF DBMS_LOB.FILEEXISTS(v_bfile) = 0 THEN
+    RAISE_APPLICATION_ERROR(-20002, 'File ' || p_file_name || ' does not exist in directory ' || p_image_dir);
+  END IF;
+
+  -- Open the BFILE for reading
+  DBMS_LOB.OPEN(v_bfile, DBMS_LOB.LOB_READONLY);
+
+  -- Check if cover record already exists
+  SELECT COUNT(*) INTO v_cover_exists
+  FROM BOOKS_COVER
+  WHERE BOOK_ID = p_book_id;
+
+  IF v_cover_exists > 0 THEN
+    -- Update existing record
+    -- First, lock the row for update
+    SELECT COVER_IMAGE INTO v_blob
+    FROM BOOKS_COVER
+    WHERE BOOK_ID = p_book_id
+    FOR UPDATE;
+
+    -- Clear any existing content
+    DBMS_LOB.TRIM(v_blob, 0);
+
+    -- Copy the BFILE data to the BLOB
+    DBMS_LOB.LOADFROMFILE(
+      dest_lob    => v_blob,
+      src_lob     => v_bfile,
+      amount      => DBMS_LOB.GETLENGTH(v_bfile)
+    );
+
+    -- Update the timestamp
+    UPDATE BOOKS_COVER
+    SET UPDATED_ON = SYSTIMESTAMP
+    WHERE BOOK_ID = p_book_id;
+
+  ELSE
+    -- Insert new record
+    -- Create a temporary BLOB
+    DBMS_LOB.CREATETEMPORARY(v_blob, TRUE);
+
+    -- Copy the BFILE data to the BLOB
+    DBMS_LOB.LOADFROMFILE(
+      dest_lob    => v_blob,
+      src_lob     => v_bfile,
+      amount      => DBMS_LOB.GETLENGTH(v_bfile)
+    );
+
+    -- Insert the new record
+    INSERT INTO BOOKS_COVER (
+      BOOK_ID,
+      COVER_IMAGE,
+      CREATED_ON,
+      UPDATED_ON
+    ) VALUES (
+      p_book_id,
+      v_blob,
+      SYSTIMESTAMP,
+      SYSTIMESTAMP
+    );
+
+    -- Free the temporary BLOB
+    DBMS_LOB.FREETEMPORARY(v_blob);
+  END IF;
+
+  -- Close the BFILE
+  DBMS_LOB.CLOSE(v_bfile);
+
+  -- Commit the transaction
+  COMMIT;
+
+  DBMS_OUTPUT.PUT_LINE('Successfully loaded image ' || p_file_name || ' for book ID ' || p_book_id);
+
+EXCEPTION
+  WHEN NO_DATA_FOUND THEN
+    ROLLBACK;
+    RAISE_APPLICATION_ERROR(-20003, 'Book ID ' || p_book_id || ' not found');
+  WHEN OTHERS THEN
+    ROLLBACK;
+    -- Close the BFILE if it's open
+    IF DBMS_LOB.ISOPEN(v_bfile) = 1 THEN
+      DBMS_LOB.CLOSE(v_bfile);
+    END IF;
+    RAISE_APPLICATION_ERROR(-20004, 'Error loading image: ' || SQLERRM);
+END load_book_cover_image;
+/
+
+-- Example usage:
+-- EXEC load_book_cover_image(101, 'BOOK_IMAGES_DIR', 'book101_cover.jpg');
+

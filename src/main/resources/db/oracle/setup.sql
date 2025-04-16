@@ -10,4 +10,5 @@ grant create database link to demo;
 grant execute on dbms_lock to demo;
 grant create public synonym to demo;
 grant create any directory to demo;
+grant create synonym to demo;
 

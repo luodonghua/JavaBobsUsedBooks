@@ -1526,9 +1526,8 @@ END load_book_cover_image;
 -- Example usage:
 -- EXEC load_book_cover_image(101, 'BOOK_IMAGES_DIR', 'book101_cover.jpg');
 
--- Oracle date time express
-
-CREATE OR REPLACE PROCEDUR p_oracle_datetime_expressions AS
+-- Oracle date time expresssion
+CREATE OR REPLACE PROCEDURE p_oracle_datetime_expressions AS
     -- Variables to hold various date/time values
     v_current_date DATE;
     v_current_timestamp TIMESTAMP;

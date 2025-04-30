@@ -416,8 +416,26 @@ END bookpkg;
 
 
 
-
 -- Extra schema objects to demostrate Oracle to other database migration
+
+
+-- Create the order history table
+CREATE TABLE ORDER_HISTORY (
+    ORDER_ID NUMBER(19,0) NOT NULL,
+    CUSTOMER_ID NUMBER(19,0),
+    ORDER_DATE DATE,
+    ORIGINAL_STATUS VARCHAR2(255 CHAR),
+    NEW_STATUS VARCHAR2(255 CHAR),
+    STATUS_CHANGE_DATE TIMESTAMP(6) NOT NULL,
+    TOTAL_AMOUNT NUMBER(38,2),
+    TRACKING_NUMBER VARCHAR2(255 CHAR),
+    NOTES VARCHAR2(255 CHAR),
+    CHANGE_REASON VARCHAR2(255 CHAR),
+    PRIMARY KEY (ORDER_ID, STATUS_CHANGE_DATE)
+);
+
+
+
 -- 1. Simple function to get book count by genre
 CREATE OR REPLACE FUNCTION get_book_count_by_genre(p_genre_id NUMBER)
 RETURN NUMBER
@@ -530,21 +548,52 @@ EXCEPTION
 END;
 /
 
--- 6. Medium complexity materialized view for customer order summary
-CREATE MATERIALIZED VIEW MV_CUSTOMER_ORDER_SUMMARY
-REFRESH ON DEMAND
-AS
-SELECT /*+ ORDERED */
-  C.ID AS CUSTOMER_ID,
-  C.FIRST_NAME,
-  C.LAST_NAME,
-  C.EMAIL,
-  COUNT(O.ID) AS ORDER_COUNT,
-  SUM(O.TOTAL_AMOUNT) AS TOTAL_SPENT,
-  MAX(O.CREATED_ON) AS LAST_ORDER_DATE
-FROM CUSTOMERS C
-LEFT JOIN ORDERS O ON C.ID = O.CUSTOMER_ID
-GROUP BY C.ID, C.FIRST_NAME, C.LAST_NAME, C.EMAIL;
+
+-- 6. Procedure to populate order history from orders table
+CREATE OR REPLACE PROCEDURE populate_order_history AS
+BEGIN
+    INSERT INTO ORDER_HISTORY (
+        ORDER_ID,
+        CUSTOMER_ID,
+        ORDER_DATE,
+        ORIGINAL_STATUS,
+        NEW_STATUS,
+        STATUS_CHANGE_DATE,
+        TOTAL_AMOUNT,
+        TRACKING_NUMBER,
+        NOTES,
+        CHANGE_REASON
+    )
+    SELECT
+        o.ID,
+        c.ID,  -- Getting customer ID from CUSTOMERS table
+        o.ORDER_DATE,
+        'NEW',
+        'PROCESSING',
+        SYSDATE,
+        o.TOTAL_AMOUNT,
+        o.TRACKING_NUMBER,
+        'Order status updated via batch process',
+        'System status update'
+    FROM
+        ORDERS o
+    JOIN
+        CUSTOMERS c ON o.CUSTOMER_ID = c.ID
+    WHERE
+        o.ORDER_STATUS = 1  -- New orders
+        AND NOT EXISTS (
+            -- Subquery to avoid duplicate entries
+            SELECT 1 FROM ORDER_HISTORY oh
+            WHERE oh.ORDER_ID = o.ID
+            AND oh.NEW_STATUS = 'PROCESSING'
+        );
+
+
+    COMMIT;
+    DBMS_OUTPUT.PUT_LINE('Added ' || SQL%ROWCOUNT || ' orders to history.');
+END;
+/
+
 
 -- 7. Complex function to calculate customer loyalty score
 CREATE OR REPLACE FUNCTION calculate_customer_loyalty_score(p_customer_id NUMBER)
@@ -581,50 +630,79 @@ BEGIN
 END;
 /
 
--- 8. Complex procedure to restock inventory and update book status
-CREATE OR REPLACE PROCEDURE restock_inventory(
-  p_book_id IN NUMBER,
-  p_quantity IN NUMBER,
-  p_update_price IN BOOLEAN DEFAULT FALSE,
-  p_new_price IN NUMBER DEFAULT NULL
-)
-IS
-  v_current_quantity NUMBER;
-  v_current_price NUMBER;
-  v_is_available NUMBER;
+-- 8. This demonstrates "tables as a target in the MERGE statement" feature
+CREATE OR REPLACE PROCEDURE merge_order_status_updates AS
 BEGIN
-  -- Get current book info
-  SELECT QUANTITY, PRICE, IS_AVAILABLE
-  INTO v_current_quantity, v_current_price, v_is_available
-  FROM BOOKS
-  WHERE ID = p_book_id;
+    -- Using MERGE statement with ORDER_HISTORY as the target table
+    MERGE INTO ORDER_HISTORY oh
+    USING (
+        -- Complex source query joining multiple tables and using analytical functions
+        SELECT
+            o.ID AS ORDER_ID,
+            o.CUSTOMER_ID,
+            o.ORDER_DATE,
+            LAG(o.STATUS) OVER (PARTITION BY o.ID ORDER BY o.CREATED_ON) AS PREVIOUS_STATUS,
+            o.STATUS AS CURRENT_STATUS,
+            o.CREATED_ON AS STATUS_CHANGE_DATE,
+            o.TOTAL_AMOUNT,
+            o.TRACKING_NUMBER,
+            o.NOTES,
+            CASE
+                WHEN o.STATUS = 'SHIPPED' THEN 'Order shipped with tracking: ' || o.TRACKING_NUMBER
+                WHEN o.STATUS = 'DELIVERED' THEN 'Order delivered on ' || TO_CHAR(o.DELIVERED_DATE, 'YYYY-MM-DD')
+                WHEN o.STATUS = 'CANCELLED' THEN o.CANCELLATION_REASON
+                ELSE 'Status updated to ' || o.STATUS
+            END AS CHANGE_REASON,
+            ROW_NUMBER() OVER (PARTITION BY o.ID ORDER BY o.CREATED_ON DESC) AS rn
+        FROM
+            ORDERS o
+        WHERE
+            o.ORDER_STATUS > 0
+    ) src
+    ON (oh.ORDER_ID = src.ORDER_ID AND oh.STATUS_CHANGE_DATE = src.STATUS_CHANGE_DATE)
 
-  -- Update inventory
-  UPDATE BOOKS
-  SET QUANTITY = v_current_quantity + p_quantity,
-      IS_AVAILABLE = CASE
-                       WHEN v_current_quantity + p_quantity > 0 THEN 1
-                       ELSE 0
-                     END,
-      PRICE = CASE
-                WHEN p_update_price AND p_new_price IS NOT NULL THEN p_new_price
-                ELSE v_current_price
-              END,
-      LAST_RESTOCK_DATE = SYSDATE,
-      UPDATED_ON = SYSTIMESTAMP
-  WHERE ID = p_book_id;
+    -- When matched, update the existing record
+    WHEN MATCHED THEN
+        UPDATE SET
+            oh.NEW_STATUS = src.CURRENT_STATUS,
+            oh.NOTES = NVL(src.NOTES, oh.NOTES),
+            oh.CHANGE_REASON = src.CHANGE_REASON
 
-  -- If book was out of stock but now available, log this change
-  IF v_is_available = 0 AND p_quantity > 0 THEN
-    -- Here you might insert into a log table or send notifications
-    NULL;
-  END IF;
+    -- When not matched, insert a new record
+    WHEN NOT MATCHED THEN
+        INSERT (
+            ORDER_ID,
+            CUSTOMER_ID,
+            ORDER_DATE,
+            ORIGINAL_STATUS,
+            NEW_STATUS,
+            STATUS_CHANGE_DATE,
+            TOTAL_AMOUNT,
+            TRACKING_NUMBER,
+            NOTES,
+            CHANGE_REASON
+        )
+        VALUES (
+            src.ORDER_ID,
+            src.CUSTOMER_ID,
+            src.ORDER_DATE,
+            NVL(src.PREVIOUS_STATUS, 'NEW'),
+            src.CURRENT_STATUS,
+            src.STATUS_CHANGE_DATE,
+            src.TOTAL_AMOUNT,
+            src.TRACKING_NUMBER,
+            src.NOTES,
+            src.CHANGE_REASON
+        );
 
-  COMMIT;
+    DBMS_OUTPUT.PUT_LINE('Added ' || SQL%ROWCOUNT || ' financial classification records.');
+    COMMIT;
+
 EXCEPTION
-  WHEN OTHERS THEN
-    ROLLBACK;
-    RAISE;
+    WHEN OTHERS THEN
+        ROLLBACK;
+        DBMS_OUTPUT.PUT_LINE('Error: ' || SQLERRM);
+        RAISE;
 END;
 /
 
@@ -946,276 +1024,6 @@ CREATE OR REPLACE PACKAGE BODY order_processing AS
 END order_processing;
 /
 
--- 12. Complex package for book inventory management
-CREATE OR REPLACE PACKAGE book_inventory AS
-  -- Add new book
-  PROCEDURE add_book(
-    p_name IN VARCHAR2,
-    p_author IN VARCHAR2,
-    p_isbn IN VARCHAR2,
-    p_description IN VARCHAR2,
-    p_price IN NUMBER,
-    p_quantity IN NUMBER,
-    p_publisher_id IN NUMBER,
-    p_genre_id IN NUMBER,
-    p_book_type_id IN NUMBER,
-    p_condition_id IN NUMBER,
-    p_publish_date IN DATE DEFAULT NULL,
-    p_year IN NUMBER DEFAULT NULL,
-    p_book_id OUT NUMBER
-  );
-
-  -- Update book details
-  PROCEDURE update_book(
-    p_book_id IN NUMBER,
-    p_name IN VARCHAR2 DEFAULT NULL,
-    p_author IN VARCHAR2 DEFAULT NULL,
-    p_description IN VARCHAR2 DEFAULT NULL,
-    p_price IN NUMBER DEFAULT NULL,
-    p_publisher_id IN NUMBER DEFAULT NULL,
-    p_genre_id IN NUMBER DEFAULT NULL
-  );
-
-  -- Set book flags
-  PROCEDURE set_book_flags(
-    p_book_id IN NUMBER,
-    p_is_bestseller IN NUMBER DEFAULT NULL,
-    p_is_featured IN NUMBER DEFAULT NULL,
-    p_is_new_arrival IN NUMBER DEFAULT NULL
-  );
-
-  -- Search books by criteria
-  FUNCTION search_books(
-    p_search_text IN VARCHAR2,
-    p_genre_id IN NUMBER DEFAULT NULL,
-    p_publisher_id IN NUMBER DEFAULT NULL,
-    p_min_price IN NUMBER DEFAULT NULL,
-    p_max_price IN NUMBER DEFAULT NULL,
-    p_is_available IN NUMBER DEFAULT 1
-  ) RETURN SYS_REFCURSOR;
-
-  -- Get low stock books
-  FUNCTION get_low_stock_books(p_threshold NUMBER DEFAULT 5) RETURN SYS_REFCURSOR;
-
-  -- Get book sales history
-  FUNCTION get_book_sales_history(p_book_id NUMBER) RETURN SYS_REFCURSOR;
-END book_inventory;
-/
-
-CREATE OR REPLACE PACKAGE BODY book_inventory AS
-  -- Add new book
-  PROCEDURE add_book(
-    p_name IN VARCHAR2,
-    p_author IN VARCHAR2,
-    p_isbn IN VARCHAR2,
-    p_description IN VARCHAR2,
-    p_price IN NUMBER,
-    p_quantity IN NUMBER,
-    p_publisher_id IN NUMBER,
-    p_genre_id IN NUMBER,
-    p_book_type_id IN NUMBER,
-    p_condition_id IN NUMBER,
-    p_publish_date IN DATE DEFAULT NULL,
-    p_year IN NUMBER DEFAULT NULL,
-    p_book_id OUT NUMBER
-  ) IS
-  BEGIN
-    INSERT INTO BOOKS (
-      NAME,
-      AUTHOR,
-      ISBN,
-      DESCRIPTION,
-      PRICE,
-      QUANTITY,
-      PUBLISHER_ID,
-      GENRE_ID,
-      BOOK_TYPE_ID,
-      CONDITION_ID,
-      PUBLISH_DATE,
-      YEAR,
-      IS_AVAILABLE,
-      IS_BESTSELLER,
-      IS_FEATURED,
-      IS_NEW_ARRIVAL,
-      CREATED_ON,
-      UPDATED_ON,
-      SEARCH_TEXT
-    ) VALUES (
-      p_name,
-      p_author,
-      p_isbn,
-      p_description,
-      p_price,
-      p_quantity,
-      p_publisher_id,
-      p_genre_id,
-      p_book_type_id,
-      p_condition_id,
-      p_publish_date,
-      p_year,
-      CASE WHEN p_quantity > 0 THEN 1 ELSE 0 END,
-      0, -- not bestseller by default
-      0, -- not featured by default
-      1, -- new arrival by default
-      SYSTIMESTAMP,
-      SYSTIMESTAMP,
-      LOWER(p_name || ' ' || p_author || ' ' || p_isbn)
-    )
-    RETURNING ID INTO p_book_id;
-
-    COMMIT;
-  EXCEPTION
-    WHEN OTHERS THEN
-      ROLLBACK;
-      RAISE;
-  END add_book;
-
-  -- Update book details
-  PROCEDURE update_book(
-    p_book_id IN NUMBER,
-    p_name IN VARCHAR2 DEFAULT NULL,
-    p_author IN VARCHAR2 DEFAULT NULL,
-    p_description IN VARCHAR2 DEFAULT NULL,
-    p_price IN NUMBER DEFAULT NULL,
-    p_publisher_id IN NUMBER DEFAULT NULL,
-    p_genre_id IN NUMBER DEFAULT NULL
-  ) IS
-    v_name BOOKS.NAME%TYPE;
-    v_author BOOKS.AUTHOR%TYPE;
-    v_isbn BOOKS.ISBN%TYPE;
-  BEGIN
-    -- Get current values for search text update
-    SELECT NAME, AUTHOR, ISBN
-    INTO v_name, v_author, v_isbn
-    FROM BOOKS
-    WHERE ID = p_book_id;
-
-    -- Update only provided fields
-    UPDATE BOOKS
-    SET NAME = NVL(p_name, NAME),
-        AUTHOR = NVL(p_author, AUTHOR),
-        DESCRIPTION = NVL(p_description, DESCRIPTION),
-        PRICE = NVL(p_price, PRICE),
-        PUBLISHER_ID = NVL(p_publisher_id, PUBLISHER_ID),
-        GENRE_ID = NVL(p_genre_id, GENRE_ID),
-        UPDATED_ON = SYSTIMESTAMP,
-        SEARCH_TEXT = LOWER(
-          NVL(p_name, v_name) || ' ' ||
-          NVL(p_author, v_author) || ' ' ||
-          v_isbn
-        )
-    WHERE ID = p_book_id;
-
-    COMMIT;
-  EXCEPTION
-    WHEN OTHERS THEN
-      ROLLBACK;
-      RAISE;
-  END update_book;
-
-  -- Set book flags
-  PROCEDURE set_book_flags(
-    p_book_id IN NUMBER,
-    p_is_bestseller IN NUMBER DEFAULT NULL,
-    p_is_featured IN NUMBER DEFAULT NULL,
-    p_is_new_arrival IN NUMBER DEFAULT NULL
-  ) IS
-  BEGIN
-    UPDATE BOOKS
-    SET IS_BESTSELLER = NVL(p_is_bestseller, IS_BESTSELLER),
-        IS_FEATURED = NVL(p_is_featured, IS_FEATURED),
-        IS_NEW_ARRIVAL = NVL(p_is_new_arrival, IS_NEW_ARRIVAL),
-        UPDATED_ON = SYSTIMESTAMP
-    WHERE ID = p_book_id;
-
-    COMMIT;
-  EXCEPTION
-    WHEN OTHERS THEN
-      ROLLBACK;
-      RAISE;
-  END set_book_flags;
-
-  -- Search books by criteria
-  FUNCTION search_books(
-    p_search_text IN VARCHAR2,
-    p_genre_id IN NUMBER DEFAULT NULL,
-    p_publisher_id IN NUMBER DEFAULT NULL,
-    p_min_price IN NUMBER DEFAULT NULL,
-    p_max_price IN NUMBER DEFAULT NULL,
-    p_is_available IN NUMBER DEFAULT 1
-  ) RETURN SYS_REFCURSOR IS
-    v_result SYS_REFCURSOR;
-  BEGIN
-    OPEN v_result FOR
-      SELECT B.*,
-             G.NAME AS GENRE_NAME,
-             P.NAME AS PUBLISHER_NAME,
-             BT.NAME AS BOOK_TYPE_NAME,
-             C.NAME AS CONDITION_NAME
-      FROM BOOKS B
-      LEFT JOIN GENRES G ON B.GENRE_ID = G.ID
-      LEFT JOIN PUBLISHERS P ON B.PUBLISHER_ID = P.ID
-      LEFT JOIN BOOK_TYPES BT ON B.BOOK_TYPE_ID = BT.ID
-      LEFT JOIN CONDITIONS C ON B.CONDITION_ID = C.ID
-      WHERE (p_search_text IS NULL OR
-             INSTR(B.SEARCH_TEXT, LOWER(p_search_text)) > 0)
-        AND (p_genre_id IS NULL OR B.GENRE_ID = p_genre_id)
-        AND (p_publisher_id IS NULL OR B.PUBLISHER_ID = p_publisher_id)
-        AND (p_min_price IS NULL OR B.PRICE >= p_min_price)
-        AND (p_max_price IS NULL OR B.PRICE <= p_max_price)
-        AND (p_is_available IS NULL OR B.IS_AVAILABLE = p_is_available)
-      ORDER BY
-        CASE WHEN p_search_text IS NOT NULL AND INSTR(LOWER(B.NAME), LOWER(p_search_text)) = 1 THEN 0 ELSE 1 END,
-        B.IS_BESTSELLER DESC,
-        B.IS_FEATURED DESC,
-        B.NAME;
-
-    RETURN v_result;
-  END search_books;
-
-  -- Get low stock books
-  FUNCTION get_low_stock_books(p_threshold NUMBER DEFAULT 5) RETURN SYS_REFCURSOR IS
-    v_result SYS_REFCURSOR;
-  BEGIN
-    OPEN v_result FOR
-      SELECT B.*,
-             G.NAME AS GENRE_NAME,
-             P.NAME AS PUBLISHER_NAME
-      FROM BOOKS B
-      LEFT JOIN GENRES G ON B.GENRE_ID = G.ID
-      LEFT JOIN PUBLISHERS P ON B.PUBLISHER_ID = P.ID
-      WHERE B.QUANTITY <= p_threshold
-        AND B.QUANTITY > 0
-      ORDER BY B.QUANTITY;
-
-    RETURN v_result;
-  END get_low_stock_books;
-
-  -- Get book sales history
-  FUNCTION get_book_sales_history(p_book_id NUMBER) RETURN SYS_REFCURSOR IS
-    v_result SYS_REFCURSOR;
-  BEGIN
-    OPEN v_result FOR
-      SELECT
-        O.ID AS ORDER_ID,
-        O.CREATED_ON AS ORDER_DATE,
-        OI.QUANTITY,
-        OI.BOOK_PRICE,
-        OI.DISCOUNT,
-        (OI.BOOK_PRICE * OI.QUANTITY - NVL(OI.DISCOUNT, 0)) AS TOTAL_AMOUNT,
-        C.ID AS CUSTOMER_ID,
-        C.FIRST_NAME || ' ' || C.LAST_NAME AS CUSTOMER_NAME
-      FROM ORDER_ITEMS OI
-      JOIN ORDERS O ON OI.ORDER_ID = O.ID
-      JOIN CUSTOMERS C ON O.CUSTOMER_ID = C.ID
-      WHERE OI.BOOK_ID = p_book_id
-      ORDER BY O.CREATED_ON DESC;
-
-    RETURN v_result;
-  END get_book_sales_history;
-END book_inventory;
-/
-
 -- 13. Simple materialized view for book inventory status
 CREATE MATERIALIZED VIEW MV_BOOK_INVENTORY_STATUS
 REFRESH ON DEMAND
@@ -1376,486 +1184,113 @@ BEGIN
 END;
 /
 
--- 18. Complex procedure for generating monthly sales report
-CREATE OR REPLACE PROCEDURE generate_monthly_sales_report(
-  p_year IN NUMBER,
-  p_month IN NUMBER,
-  p_report_cursor OUT SYS_REFCURSOR
-)
-IS
-  v_start_date DATE;
-  v_end_date DATE;
+-- 18. pivit table
+CREATE OR REPLACE FUNCTION get_book_status_by_year
+RETURN SYS_REFCURSOR AS
+    v_result SYS_REFCURSOR;
 BEGIN
-  -- Calculate date range for the report
-  v_start_date := TO_DATE(p_year || '-' || p_month || '-01', 'YYYY-MM-DD');
-  v_end_date := LAST_DAY(v_start_date) + INTERVAL '1' DAY - INTERVAL '1' SECOND;
+    -- Open cursor with PIVOT query using only BOOKS table
+    OPEN v_result FOR
+        SELECT
+            *
+        FROM (
+            -- Source query with book status
+            SELECT
+                CASE
+                    WHEN b.IS_BESTSELLER = 1 THEN 'BESTSELLER'
+                    WHEN b.IS_NEW_ARRIVAL = 1 THEN 'NEW_ARRIVAL'
+                    WHEN b.IS_FEATURED = 1 THEN 'FEATURED'
+                    ELSE 'REGULAR'
+                END AS BOOK_STATUS,
+                COUNT(*) AS BOOK_COUNT
+            FROM
+                BOOKS b
+            GROUP BY
+                CASE
+                    WHEN b.IS_BESTSELLER = 1 THEN 'BESTSELLER'
+                    WHEN b.IS_NEW_ARRIVAL = 1 THEN 'NEW_ARRIVAL'
+                    WHEN b.IS_FEATURED = 1 THEN 'FEATURED'
+                    ELSE 'REGULAR'
+                END
+        )
+        PIVOT (
+            -- PIVOT to count books by status for each publication year
+            SUM(BOOK_COUNT)
+            FOR BOOK_STATUS IN (
+                'BESTSELLER' AS BESTSELLERS,
+                'NEW_ARRIVAL' AS NEW_ARRIVALS,
+                'FEATURED' AS FEATURED,
+                'REGULAR' AS REGULAR
+            )
+        );
+        
 
-  -- Generate the report
-  OPEN p_report_cursor FOR
-    WITH monthly_sales AS (
-      SELECT
-        B.ID AS BOOK_ID,
-        B.NAME AS BOOK_TITLE,
-        B.AUTHOR,
-        G.NAME AS GENRE,
-        P.NAME AS PUBLISHER,
-        SUM(OI.QUANTITY) AS QUANTITY_SOLD,
-        SUM(OI.BOOK_PRICE * OI.QUANTITY) AS GROSS_REVENUE,
-        SUM(OI.DISCOUNT) AS TOTAL_DISCOUNTS,
-        SUM(OI.BOOK_PRICE * OI.QUANTITY - NVL(OI.DISCOUNT, 0)) AS NET_REVENUE
-      FROM BOOKS B
-      JOIN ORDER_ITEMS OI ON B.ID = OI.BOOK_ID
-      JOIN ORDERS O ON OI.ORDER_ID = O.ID
-      LEFT JOIN GENRES G ON B.GENRE_ID = G.ID
-      LEFT JOIN PUBLISHERS P ON B.PUBLISHER_ID = P.ID
-      WHERE O.CREATED_ON BETWEEN v_start_date AND v_end_date
-        AND O.ORDER_STATUS != 4  -- Exclude cancelled orders
-      GROUP BY B.ID, B.NAME, B.AUTHOR, G.NAME, P.NAME
-    ),
-    top_books AS (
-      SELECT
-        ms.*,
-        ROW_NUMBER() OVER (ORDER BY ms.QUANTITY_SOLD DESC) AS RN
-      FROM monthly_sales ms
-    ),
-    genre_sales AS (
-      SELECT
-        G.NAME AS GENRE,
-        COUNT(DISTINCT B.ID) AS UNIQUE_BOOKS_SOLD,
-        SUM(OI.QUANTITY) AS QUANTITY_SOLD,
-        SUM(OI.BOOK_PRICE * OI.QUANTITY - NVL(OI.DISCOUNT, 0)) AS NET_REVENUE,
-        ROW_NUMBER() OVER (ORDER BY SUM(OI.BOOK_PRICE * OI.QUANTITY - NVL(OI.DISCOUNT, 0)) DESC) AS RN_REVENUE
-      FROM GENRES G
-      JOIN BOOKS B ON G.ID = B.GENRE_ID
-      JOIN ORDER_ITEMS OI ON B.ID = OI.BOOK_ID
-      JOIN ORDERS O ON OI.ORDER_ID = O.ID
-      WHERE O.CREATED_ON BETWEEN v_start_date AND v_end_date
-        AND O.ORDER_STATUS != 4  -- Exclude cancelled orders
-      GROUP BY G.NAME
-    ),
-    daily_sales AS (
-      SELECT
-        TRUNC(O.CREATED_ON) AS SALE_DATE,
-        COUNT(DISTINCT O.ID) AS ORDER_COUNT,
-        SUM(O.TOTAL_AMOUNT) AS DAILY_REVENUE,
-        ROW_NUMBER() OVER (ORDER BY TRUNC(O.CREATED_ON)) AS RN_DATE
-      FROM ORDERS O
-      WHERE O.CREATED_ON BETWEEN v_start_date AND v_end_date
-        AND O.ORDER_STATUS != 4  -- Exclude cancelled orders
-      GROUP BY TRUNC(O.CREATED_ON)
-    )
-    -- Monthly Summary (Section 1)
-    SELECT
-      1 AS SECTION_ORDER,
-      0 AS SUBSECTION_ORDER,
-      'MONTHLY_SUMMARY' AS REPORT_SECTION,
-      TO_CHAR(v_start_date, 'YYYY-MM') AS REPORT_PERIOD,
-      COUNT(DISTINCT ms.BOOK_ID) AS UNIQUE_BOOKS_SOLD,
-      SUM(ms.QUANTITY_SOLD) AS TOTAL_BOOKS_SOLD,
-      SUM(ms.GROSS_REVENUE) AS GROSS_REVENUE,
-      SUM(ms.TOTAL_DISCOUNTS) AS TOTAL_DISCOUNTS,
-      SUM(ms.NET_REVENUE) AS NET_REVENUE,
-      (SELECT COUNT(DISTINCT O.ID)
-       FROM ORDERS O
-       WHERE O.CREATED_ON BETWEEN v_start_date AND v_end_date
-         AND O.ORDER_STATUS != 4) AS ORDER_COUNT,
-      (SELECT COUNT(DISTINCT O.CUSTOMER_ID)
-       FROM ORDERS O
-       WHERE O.CREATED_ON BETWEEN v_start_date AND v_end_date
-         AND O.ORDER_STATUS != 4) AS CUSTOMER_COUNT
-    FROM monthly_sales ms
-
-    UNION ALL
-
-    -- Top Books (Section 2)
-    SELECT
-      2 AS SECTION_ORDER,
-      tb.RN AS SUBSECTION_ORDER,
-      'TOP_BOOKS' AS REPORT_SECTION,
-      tb.BOOK_TITLE AS REPORT_PERIOD,
-      NULL AS UNIQUE_BOOKS_SOLD,
-      tb.QUANTITY_SOLD AS TOTAL_BOOKS_SOLD,
-      tb.GROSS_REVENUE,
-      tb.TOTAL_DISCOUNTS,
-      tb.NET_REVENUE,
-      NULL AS ORDER_COUNT,
-      NULL AS CUSTOMER_COUNT
-    FROM top_books tb
-    WHERE RN <= 10
-
-    UNION ALL
-
-    -- Genre Performance (Section 3)
-    SELECT
-      3 AS SECTION_ORDER,
-      gs.RN_REVENUE AS SUBSECTION_ORDER,
-      'GENRE_PERFORMANCE' AS REPORT_SECTION,
-      gs.GENRE AS REPORT_PERIOD,
-      gs.UNIQUE_BOOKS_SOLD,
-      gs.QUANTITY_SOLD AS TOTAL_BOOKS_SOLD,
-      NULL AS GROSS_REVENUE,
-      NULL AS TOTAL_DISCOUNTS,
-      gs.NET_REVENUE,
-      NULL AS ORDER_COUNT,
-      NULL AS CUSTOMER_COUNT
-    FROM genre_sales gs
-
-    UNION ALL
-
-    -- Daily Sales (Section 4)
-    SELECT
-      4 AS SECTION_ORDER,
-      ds.RN_DATE AS SUBSECTION_ORDER,
-      'DAILY_SALES' AS REPORT_SECTION,
-      TO_CHAR(ds.SALE_DATE, 'YYYY-MM-DD') AS REPORT_PERIOD,
-      NULL AS UNIQUE_BOOKS_SOLD,
-      NULL AS TOTAL_BOOKS_SOLD,
-      NULL AS GROSS_REVENUE,
-      NULL AS TOTAL_DISCOUNTS,
-      ds.DAILY_REVENUE AS NET_REVENUE,
-      ds.ORDER_COUNT,
-      NULL AS CUSTOMER_COUNT
-    FROM daily_sales ds
-    ORDER BY SECTION_ORDER, SUBSECTION_ORDER;
+    RETURN v_result;
 END;
 /
 
--- 19. Complex materialized view for customer segmentation
-CREATE MATERIALIZED VIEW MV_CUSTOMER_SEGMENTATION
-REFRESH COMPLETE ON DEMAND
-START WITH SYSDATE
-NEXT SYSDATE + 30
-AS
-WITH customer_metrics AS (
-  SELECT
-    C.ID AS CUSTOMER_ID,
-    C.FIRST_NAME || ' ' || C.LAST_NAME AS CUSTOMER_NAME,
-    C.EMAIL,
-    COUNT(DISTINCT O.ID) AS ORDER_COUNT,
-    SUM(O.TOTAL_AMOUNT) AS TOTAL_SPENT,
-    ROUND(AVG(O.TOTAL_AMOUNT), 2) AS AVG_ORDER_VALUE_SIMPLE,
-    MAX(O.CREATED_ON) AS LAST_ORDER_DATE,
-    MIN(O.CREATED_ON) AS FIRST_ORDER_DATE,
-    ROUND(MONTHS_BETWEEN(SYSDATE, MIN(O.CREATED_ON)), 1) AS CUSTOMER_TENURE_MONTHS,
-    ROUND(MONTHS_BETWEEN(SYSDATE, MAX(O.CREATED_ON)), 1) AS MONTHS_SINCE_LAST_ORDER,
-    COUNT(DISTINCT TRUNC(O.CREATED_ON, 'MM')) AS ACTIVE_MONTHS
-  FROM CUSTOMERS C
-  LEFT JOIN ORDERS O ON C.ID = O.CUSTOMER_ID AND O.ORDER_STATUS != 4 -- Exclude cancelled orders
-  GROUP BY C.ID, C.FIRST_NAME || ' ' || C.LAST_NAME, C.EMAIL
-)
-SELECT
-  CM.*,
-  CASE
-    WHEN CM.ORDER_COUNT = 0 THEN 'Inactive'
-    WHEN CM.MONTHS_SINCE_LAST_ORDER > 12 THEN 'Dormant'
-    WHEN CM.ORDER_COUNT = 1 AND CM.MONTHS_SINCE_LAST_ORDER <= 3 THEN 'New Customer'
-    WHEN CM.ORDER_COUNT >= 4 AND CM.TOTAL_SPENT >= 500 AND CM.MONTHS_SINCE_LAST_ORDER <= 3 THEN 'VIP'
-    WHEN CM.ORDER_COUNT >= 2 AND CM.MONTHS_SINCE_LAST_ORDER <= 6 THEN 'Active'
-    ELSE 'At Risk'
-  END AS CUSTOMER_SEGMENT,
-  CASE
-    WHEN CM.ORDER_COUNT > 0 THEN ROUND(CM.TOTAL_SPENT / CM.ORDER_COUNT, 2)
-    ELSE 0
-  END AS AVG_ORDER_VALUE,
-  CASE
-    WHEN CM.CUSTOMER_TENURE_MONTHS > 0 AND CM.ACTIVE_MONTHS > 0 THEN
-      ROUND(CM.ACTIVE_MONTHS / CM.CUSTOMER_TENURE_MONTHS, 2)
-    ELSE 0
-  END AS ENGAGEMENT_RATIO,
-  CASE
-    WHEN CM.CUSTOMER_TENURE_MONTHS > 0 THEN
-      ROUND(CM.TOTAL_SPENT / CM.CUSTOMER_TENURE_MONTHS, 2)
-    ELSE 0
-  END AS MONTHLY_VALUE
-FROM customer_metrics CM;
+-- 19. pipelined table functions
 
--- 20. Complex package for reporting and analytics
-CREATE OR REPLACE PACKAGE book_analytics AS
-  -- Get sales trend by time period
-  FUNCTION get_sales_trend(
-    p_start_date IN DATE,
-    p_end_date IN DATE,
-    p_interval IN VARCHAR2 DEFAULT 'MONTH' -- 'DAY', 'WEEK', 'MONTH', 'QUARTER', 'YEAR'
-  ) RETURN SYS_REFCURSOR;
-
-  -- Get bestselling books for a period
-  FUNCTION get_bestsellers(
-    p_start_date IN DATE,
-    p_end_date IN DATE,
-    p_limit IN NUMBER DEFAULT 10,
-    p_genre_id IN NUMBER DEFAULT NULL
-  ) RETURN SYS_REFCURSOR;
-
-  -- Get customer purchase history
-  FUNCTION get_customer_history(
-    p_customer_id IN NUMBER
-  ) RETURN SYS_REFCURSOR;
-
-  -- Calculate inventory turnover
-  FUNCTION calculate_inventory_turnover(
-    p_start_date IN DATE,
-    p_end_date IN DATE
-  ) RETURN SYS_REFCURSOR;
-
-  -- Generate revenue forecast
-  PROCEDURE generate_revenue_forecast(
-    p_months_ahead IN NUMBER DEFAULT 3,
-    p_forecast_cursor OUT SYS_REFCURSOR
-  );
-END book_analytics;
+-- Create a simple object type for book statistics
+CREATE OR REPLACE TYPE genre_stat_obj AS OBJECT (
+    genre_name VARCHAR2(255),
+    bestsellers NUMBER,
+    new_arrivals NUMBER,
+    featured NUMBER,
+    regular NUMBER
+);
 /
 
-CREATE OR REPLACE PACKAGE BODY book_analytics AS
-  -- Get sales trend by time period
-  FUNCTION get_sales_trend(
-    p_start_date IN DATE,
-    p_end_date IN DATE,
-    p_interval IN VARCHAR2 DEFAULT 'MONTH' -- 'DAY', 'WEEK', 'MONTH', 'QUARTER', 'YEAR'
-  ) RETURN SYS_REFCURSOR IS
-    v_result SYS_REFCURSOR;
-    v_trunc_format VARCHAR2(20);
-  BEGIN
-    -- Determine the truncation format based on interval
-    CASE UPPER(p_interval)
-      WHEN 'DAY' THEN v_trunc_format := 'DD';
-      WHEN 'WEEK' THEN v_trunc_format := 'IW';
-      WHEN 'MONTH' THEN v_trunc_format := 'MM';
-      WHEN 'QUARTER' THEN v_trunc_format := 'Q';
-      WHEN 'YEAR' THEN v_trunc_format := 'YYYY';
-      ELSE v_trunc_format := 'MM'; -- Default to month
-    END CASE;
+-- Create a table type based on our object type
+CREATE OR REPLACE TYPE genre_stat_tab AS TABLE OF genre_stat_obj;
+/
 
-    OPEN v_result FOR
-      SELECT
-        TRUNC(O.CREATED_ON, v_trunc_format) AS PERIOD_START,
-        CASE UPPER(p_interval)
-          WHEN 'DAY' THEN TO_CHAR(TRUNC(O.CREATED_ON, v_trunc_format), 'YYYY-MM-DD')
-          WHEN 'WEEK' THEN 'Week ' || TO_CHAR(TRUNC(O.CREATED_ON, v_trunc_format), 'IW') || ', ' || TO_CHAR(TRUNC(O.CREATED_ON, v_trunc_format), 'YYYY')
-          WHEN 'MONTH' THEN TO_CHAR(TRUNC(O.CREATED_ON, v_trunc_format), 'YYYY-MM')
-          WHEN 'QUARTER' THEN 'Q' || TO_CHAR(TRUNC(O.CREATED_ON, v_trunc_format), 'Q') || ' ' || TO_CHAR(TRUNC(O.CREATED_ON, v_trunc_format), 'YYYY')
-          WHEN 'YEAR' THEN TO_CHAR(TRUNC(O.CREATED_ON, v_trunc_format), 'YYYY')
-          ELSE TO_CHAR(TRUNC(O.CREATED_ON, v_trunc_format), 'YYYY-MM')
-        END AS PERIOD_LABEL,
-        COUNT(DISTINCT O.ID) AS ORDER_COUNT,
-        SUM(O.TOTAL_AMOUNT) AS REVENUE,
-        COUNT(DISTINCT O.CUSTOMER_ID) AS CUSTOMER_COUNT,
-        SUM(OI.QUANTITY) AS BOOKS_SOLD,
-        ROUND(AVG(O.TOTAL_AMOUNT), 2) AS AVG_ORDER_VALUE
-      FROM ORDERS O
-      JOIN ORDER_ITEMS OI ON O.ID = OI.ORDER_ID
-      WHERE O.CREATED_ON BETWEEN p_start_date AND p_end_date
-        AND O.ORDER_STATUS != 4 -- Exclude cancelled orders
-      GROUP BY TRUNC(O.CREATED_ON, v_trunc_format)
-      ORDER BY TRUNC(O.CREATED_ON, v_trunc_format);
-
-    RETURN v_result;
-  END get_sales_trend;
-
-  -- Get bestselling books for a period
-  FUNCTION get_bestsellers(
-    p_start_date IN DATE,
-    p_end_date IN DATE,
-    p_limit IN NUMBER DEFAULT 10,
-    p_genre_id IN NUMBER DEFAULT NULL
-  ) RETURN SYS_REFCURSOR IS
-    v_result SYS_REFCURSOR;
-  BEGIN
-    OPEN v_result FOR
-      SELECT
-        B.ID,
-        B.NAME,
-        B.AUTHOR,
-        G.NAME AS GENRE,
-        P.NAME AS PUBLISHER,
-        SUM(OI.QUANTITY) AS QUANTITY_SOLD,
-        SUM(OI.BOOK_PRICE * OI.QUANTITY - NVL(OI.DISCOUNT, 0)) AS REVENUE,
-        COUNT(DISTINCT O.ID) AS ORDER_COUNT,
-        COUNT(DISTINCT O.CUSTOMER_ID) AS CUSTOMER_COUNT,
-        ROUND(AVG(OI.BOOK_PRICE), 2) AS AVG_PRICE
-      FROM BOOKS B
-      JOIN ORDER_ITEMS OI ON B.ID = OI.BOOK_ID
-      JOIN ORDERS O ON OI.ORDER_ID = O.ID
-      LEFT JOIN GENRES G ON B.GENRE_ID = G.ID
-      LEFT JOIN PUBLISHERS P ON B.PUBLISHER_ID = P.ID
-      WHERE O.CREATED_ON BETWEEN p_start_date AND p_end_date
-        AND O.ORDER_STATUS != 4 -- Exclude cancelled orders
-        AND (p_genre_id IS NULL OR B.GENRE_ID = p_genre_id)
-      GROUP BY B.ID, B.NAME, B.AUTHOR, G.NAME, P.NAME
-      ORDER BY SUM(OI.QUANTITY) DESC
-      FETCH FIRST p_limit ROWS ONLY;
-
-    RETURN v_result;
-  END get_bestsellers;
-
-  -- Get customer purchase history
-  FUNCTION get_customer_history(
-    p_customer_id IN NUMBER
-  ) RETURN SYS_REFCURSOR IS
-    v_result SYS_REFCURSOR;
-  BEGIN
-    OPEN v_result FOR
-      SELECT
-        O.ID AS ORDER_ID,
-        O.CREATED_ON AS ORDER_DATE,
-        O.ORDER_STATUS,
-        CASE O.ORDER_STATUS
-          WHEN 1 THEN 'New'
-          WHEN 2 THEN 'Shipped'
-          WHEN 3 THEN 'Delivered'
-          WHEN 4 THEN 'Cancelled'
-          ELSE 'Unknown'
-        END AS STATUS_DESCRIPTION,
-        O.TOTAL_AMOUNT,
-        B.ID AS BOOK_ID,
-        B.NAME AS BOOK_TITLE,
-        B.AUTHOR,
-        G.NAME AS GENRE,
-        OI.QUANTITY,
-        OI.BOOK_PRICE,
-        OI.DISCOUNT,
-        (OI.BOOK_PRICE * OI.QUANTITY - NVL(OI.DISCOUNT, 0)) AS ITEM_TOTAL
-      FROM ORDERS O
-      JOIN ORDER_ITEMS OI ON O.ID = OI.ORDER_ID
-      JOIN BOOKS B ON OI.BOOK_ID = B.ID
-      LEFT JOIN GENRES G ON B.GENRE_ID = G.ID
-      WHERE O.CUSTOMER_ID = p_customer_id
-      ORDER BY O.CREATED_ON DESC, O.ID, B.NAME;
-
-    RETURN v_result;
-  END get_customer_history;
-
-  -- Calculate inventory turnover
-  FUNCTION calculate_inventory_turnover(
-    p_start_date IN DATE,
-    p_end_date IN DATE
-  ) RETURN SYS_REFCURSOR IS
-    v_result SYS_REFCURSOR;
-  BEGIN
-    OPEN v_result FOR
-      WITH book_sales AS (
+-- Create a simple pipelined function
+CREATE OR REPLACE FUNCTION get_genre_book_counts
+RETURN genre_stat_tab PIPELINED IS
+BEGIN
+    -- For each genre, pipe a row with book counts by status
+    FOR genre_rec IN (
         SELECT
-          B.ID,
-          B.NAME,
-          B.AUTHOR,
-          G.NAME AS GENRE,
-          SUM(OI.QUANTITY) AS QUANTITY_SOLD,
-          SUM(OI.BOOK_PRICE * OI.QUANTITY) AS REVENUE
-        FROM BOOKS B
-        JOIN ORDER_ITEMS OI ON B.ID = OI.BOOK_ID
-        JOIN ORDERS O ON OI.ORDER_ID = O.ID
-        LEFT JOIN GENRES G ON B.GENRE_ID = G.ID
-        WHERE O.CREATED_ON BETWEEN p_start_date AND p_end_date
-          AND O.ORDER_STATUS != 4 -- Exclude cancelled orders
-        GROUP BY B.ID, B.NAME, B.AUTHOR, G.NAME
-      )
-      SELECT
-        BS.ID,
-        BS.NAME,
-        BS.AUTHOR,
-        BS.GENRE,
-        B.QUANTITY AS CURRENT_STOCK,
-        BS.QUANTITY_SOLD,
-        BS.REVENUE,
-        CASE
-          WHEN B.QUANTITY > 0 THEN ROUND(BS.QUANTITY_SOLD / B.QUANTITY, 2)
-          ELSE NULL
-        END AS TURNOVER_RATIO,
-        CASE
-          WHEN B.QUANTITY > 0 AND BS.QUANTITY_SOLD > 0
-            THEN ROUND(B.QUANTITY / (BS.QUANTITY_SOLD / ((p_end_date - p_start_date) / 30)), 1)
-          ELSE NULL
-        END AS MONTHS_OF_INVENTORY
-      FROM book_sales BS
-      JOIN BOOKS B ON BS.ID = B.ID
-      ORDER BY
-        CASE
-          WHEN B.QUANTITY > 0 THEN BS.QUANTITY_SOLD / B.QUANTITY
-          ELSE 0
-        END DESC;
+            g.NAME AS genre_name,
+            SUM(CASE WHEN b.IS_BESTSELLER = 1 THEN 1 ELSE 0 END) AS bestsellers,
+            SUM(CASE WHEN b.IS_NEW_ARRIVAL = 1 THEN 1 ELSE 0 END) AS new_arrivals,
+            SUM(CASE WHEN b.IS_FEATURED = 1 THEN 1 ELSE 0 END) AS featured,
+            SUM(CASE WHEN b.IS_BESTSELLER = 0 AND b.IS_NEW_ARRIVAL = 0 AND b.IS_FEATURED = 0 THEN 1 ELSE 0 END) AS regular
+        FROM
+            GENRES g
+        LEFT JOIN
+            BOOKS b ON g.ID = b.GENRE_ID
+        GROUP BY
+            g.NAME
+        ORDER BY
+            g.NAME
+    ) LOOP
+        -- Pipe the row to the output
+        PIPE ROW(genre_stat_obj(
+            genre_rec.genre_name,
+            genre_rec.bestsellers,
+            genre_rec.new_arrivals,
+            genre_rec.featured,
+            genre_rec.regular
+        ));
+    END LOOP;
 
+    RETURN;
+END get_genre_book_counts;
+/
+
+CREATE OR REPLACE FUNCTION display_genre_book_counts
+RETURN SYS_REFCURSOR AS
+    v_result SYS_REFCURSOR;
+BEGIN
+    -- Open a cursor that calls our pipelined function
+    OPEN v_result FOR
+        SELECT * FROM TABLE(get_genre_book_counts);
+
+    -- Return the cursor to the caller
     RETURN v_result;
-  END calculate_inventory_turnover;
-
-  -- Generate revenue forecast
-  PROCEDURE generate_revenue_forecast(
-    p_months_ahead IN NUMBER DEFAULT 3,
-    p_forecast_cursor OUT SYS_REFCURSOR
-  ) IS
-    v_months_of_history NUMBER := 12; -- Use 12 months of history for forecasting
-    v_start_date DATE;
-  BEGIN
-    -- Calculate start date for historical data
-    v_start_date := ADD_MONTHS(TRUNC(SYSDATE, 'MM'), -v_months_of_history);
-
-    -- Generate forecast based on historical data
-    OPEN p_forecast_cursor FOR
-      WITH monthly_sales AS (
-        SELECT
-          TRUNC(O.CREATED_ON, 'MM') AS MONTH_START,
-          TO_CHAR(TRUNC(O.CREATED_ON, 'MM'), 'YYYY-MM') AS MONTH_LABEL,
-          SUM(O.TOTAL_AMOUNT) AS MONTHLY_REVENUE,
-          COUNT(DISTINCT O.ID) AS ORDER_COUNT,
-          SUM(OI.QUANTITY) AS BOOKS_SOLD
-        FROM ORDERS O
-        JOIN ORDER_ITEMS OI ON O.ID = OI.ORDER_ID
-        WHERE O.CREATED_ON >= v_start_date
-          AND O.ORDER_STATUS != 4 -- Exclude cancelled orders
-        GROUP BY TRUNC(O.CREATED_ON, 'MM')
-        ORDER BY TRUNC(O.CREATED_ON, 'MM')
-      ),
-      monthly_stats AS (
-        SELECT
-          AVG(MONTHLY_REVENUE) AS AVG_MONTHLY_REVENUE,
-          STDDEV(MONTHLY_REVENUE) AS STDDEV_MONTHLY_REVENUE,
-          REGR_SLOPE(MONTHLY_REVENUE, ROWNUM) AS REVENUE_TREND,
-          AVG(ORDER_COUNT) AS AVG_ORDER_COUNT,
-          AVG(BOOKS_SOLD) AS AVG_BOOKS_SOLD
-        FROM monthly_sales
-      ),
-      forecast_months AS (
-        SELECT
-          ADD_MONTHS(TRUNC(SYSDATE, 'MM'), LEVEL) AS FORECAST_MONTH,
-          TO_CHAR(ADD_MONTHS(TRUNC(SYSDATE, 'MM'), LEVEL), 'YYYY-MM') AS MONTH_LABEL,
-          LEVEL AS MONTH_NUM
-        FROM DUAL
-        CONNECT BY LEVEL <= p_months_ahead
-      )
-      SELECT
-        FM.MONTH_LABEL,
-        -- Calculate forecasted revenue with trend and seasonal adjustments
-        ROUND(
-          MS.AVG_MONTHLY_REVENUE +
-          (MS.REVENUE_TREND * FM.MONTH_NUM) +
-          -- Add seasonal adjustment based on month (simplified)
-          CASE TO_CHAR(FM.FORECAST_MONTH, 'MM')
-            WHEN '11' THEN MS.AVG_MONTHLY_REVENUE * 0.2 -- Holiday season boost
-            WHEN '12' THEN MS.AVG_MONTHLY_REVENUE * 0.3 -- Holiday season boost
-            WHEN '01' THEN MS.AVG_MONTHLY_REVENUE * -0.1 -- Post-holiday dip
-            ELSE 0
-          END,
-          2
-        ) AS FORECASTED_REVENUE,
-        -- Calculate lower bound of forecast (95% confidence)
-        ROUND(
-          MS.AVG_MONTHLY_REVENUE +
-          (MS.REVENUE_TREND * FM.MONTH_NUM) -
-          (1.96 * MS.STDDEV_MONTHLY_REVENUE / SQRT(v_months_of_history)),
-          2
-        ) AS LOWER_BOUND,
-        -- Calculate upper bound of forecast (95% confidence)
-        ROUND(
-          MS.AVG_MONTHLY_REVENUE +
-          (MS.REVENUE_TREND * FM.MONTH_NUM) +
-          (1.96 * MS.STDDEV_MONTHLY_REVENUE / SQRT(v_months_of_history)),
-          2
-        ) AS UPPER_BOUND,
-        ROUND(MS.AVG_ORDER_COUNT * (1 + (MS.REVENUE_TREND / MS.AVG_MONTHLY_REVENUE) * FM.MONTH_NUM)) AS FORECASTED_ORDERS,
-        ROUND(MS.AVG_BOOKS_SOLD * (1 + (MS.REVENUE_TREND / MS.AVG_MONTHLY_REVENUE) * FM.MONTH_NUM)) AS FORECASTED_BOOKS_SOLD
-      FROM forecast_months FM
-      CROSS JOIN monthly_stats MS
-      ORDER BY FM.FORECAST_MONTH;
-  END generate_revenue_forecast;
-END book_analytics;
+END display_genre_book_counts;
 /
 
 
@@ -2091,3 +1526,36 @@ END load_book_cover_image;
 -- Example usage:
 -- EXEC load_book_cover_image(101, 'BOOK_IMAGES_DIR', 'book101_cover.jpg');
 
+-- Oracle date time express
+
+CREATE OR REPLACE PROCEDUR p_oracle_datetime_expressions AS
+    -- Variables to hold various date/time values
+    v_current_date DATE;
+    v_current_timestamp TIMESTAMP;
+    v_current_timestamp_tz TIMESTAMP WITH TIME ZONE;
+
+BEGIN
+    -- Current date and time functions
+    v_current_date := SYSDATE;
+    v_current_timestamp := SYSTIMESTAMP;
+    v_current_timestamp_tz := CURRENT_TIMESTAMP;
+
+    -- Output current date/time values
+    DBMS_OUTPUT.PUT_LINE('===== Current Date/Time Values =====');
+    DBMS_OUTPUT.PUT_LINE('SYSDATE: ' || TO_CHAR(v_current_date, 'YYYY-MM-DD HH24:MI:SS'));
+    DBMS_OUTPUT.PUT_LINE('SYSTIMESTAMP: ' || TO_CHAR(v_current_timestamp, 'YYYY-MM-DD HH24:MI:SS.FF'));
+    DBMS_OUTPUT.PUT_LINE('CURRENT_TIMESTAMP: ' || TO_CHAR(v_current_timestamp_tz, 'YYYY-MM-DD HH24:MI:SS.FF TZH:TZM'));
+
+    -- Date arithmetic
+    DBMS_OUTPUT.PUT_LINE('===== Date Arithmetic =====');
+    DBMS_OUTPUT.PUT_LINE('Tomorrow: ' || TO_CHAR(v_current_date + 1, 'YYYY-MM-DD'));
+    DBMS_OUTPUT.PUT_LINE('Yesterday: ' || TO_CHAR(v_current_date - 1, 'YYYY-MM-DD'));
+    DBMS_OUTPUT.PUT_LINE('Next week: ' || TO_CHAR(v_current_date + 7, 'YYYY-MM-DD'));
+    DBMS_OUTPUT.PUT_LINE('3 hours later: ' || TO_CHAR(v_current_date + (3/24), 'YYYY-MM-DD HH24:MI:SS'));
+    DBMS_OUTPUT.PUT_LINE('45 minutes later: ' || TO_CHAR(v_current_date + (45/(24*60)), 'YYYY-MM-DD HH24:MI:SS'));
+
+EXCEPTION
+    WHEN OTHERS THEN
+        DBMS_OUTPUT.PUT_LINE('Error: ' || SQLERRM);
+END p_oracle_datetime_expressions;
+/

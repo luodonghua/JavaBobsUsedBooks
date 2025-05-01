@@ -685,13 +685,6 @@ BEGIN
         );
 
     DBMS_OUTPUT.PUT_LINE('Added ' || SQL%ROWCOUNT || ' financial classification records.');
-    COMMIT;
-
-EXCEPTION
-    WHEN OTHERS THEN
-        ROLLBACK;
-        DBMS_OUTPUT.PUT_LINE('Error: ' || SQLERRM);
-        RAISE;
 END;
 /
 

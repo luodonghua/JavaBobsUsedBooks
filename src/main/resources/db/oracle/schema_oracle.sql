@@ -871,11 +871,6 @@ CREATE OR REPLACE PACKAGE BODY order_processing AS
     )
     RETURNING ID INTO p_order_id;
 
-    COMMIT;
-  EXCEPTION
-    WHEN OTHERS THEN
-      ROLLBACK;
-      RAISE;
   END create_order;
 
   -- Add item to order
@@ -922,11 +917,6 @@ CREATE OR REPLACE PACKAGE BODY order_processing AS
     SET TOTAL_AMOUNT = get_order_total(p_order_id)
     WHERE ID = p_order_id;
 
-    COMMIT;
-  EXCEPTION
-    WHEN OTHERS THEN
-      ROLLBACK;
-      RAISE;
   END add_order_item;
 
   -- Update order status
@@ -941,11 +931,6 @@ CREATE OR REPLACE PACKAGE BODY order_processing AS
         DELIVERED_DATE = CASE WHEN p_status = 3 THEN SYSDATE ELSE DELIVERED_DATE END
     WHERE ID = p_order_id;
 
-    COMMIT;
-  EXCEPTION
-    WHEN OTHERS THEN
-      ROLLBACK;
-      RAISE;
   END update_order_status;
 
   -- Calculate order total
@@ -986,12 +971,6 @@ CREATE OR REPLACE PACKAGE BODY order_processing AS
       WHERE ID = item.BOOK_ID;
     END LOOP;
 
-    COMMIT;
-  EXCEPTION
-    WHEN OTHERS THEN
-      ROLLBACK;
-      RAISE;
-  END cancel_order;
 END order_processing;
 /
 

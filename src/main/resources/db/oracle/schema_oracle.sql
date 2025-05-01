@@ -971,6 +971,12 @@ CREATE OR REPLACE PACKAGE BODY order_processing AS
       WHERE ID = item.BOOK_ID;
     END LOOP;
 
+    COMMIT;
+  EXCEPTION
+    WHEN OTHERS THEN
+      ROLLBACK;
+      RAISE;
+  END cancel_order;
 END order_processing;
 /
 

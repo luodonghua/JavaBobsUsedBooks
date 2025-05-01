@@ -577,8 +577,6 @@ BEGIN
             AND oh.NEW_STATUS = 'PROCESSING'
         );
 
-
-    COMMIT;
     DBMS_OUTPUT.PUT_LINE('Added ' || SQL%ROWCOUNT || ' orders to history.');
 END;
 /

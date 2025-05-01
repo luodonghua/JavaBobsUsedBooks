@@ -462,12 +462,6 @@ BEGIN
   SET PRICE = p_new_price,
       UPDATED_ON = SYSTIMESTAMP
   WHERE ID = p_book_id;
-
-  COMMIT;
-EXCEPTION
-  WHEN OTHERS THEN
-    ROLLBACK;
-    RAISE;
 END;
 /
 
@@ -540,11 +534,6 @@ BEGIN
     WHERE ID = p_offer_id;
   END IF;
 
-  COMMIT;
-EXCEPTION
-  WHEN OTHERS THEN
-    ROLLBACK;
-    RAISE;
 END;
 /
 
@@ -812,11 +801,6 @@ CREATE OR REPLACE PACKAGE BODY customer_mgmt AS
     )
     RETURNING ID INTO p_customer_id;
 
-    COMMIT;
-  EXCEPTION
-    WHEN OTHERS THEN
-      ROLLBACK;
-      RAISE;
   END create_customer;
 
   -- Update customer email
@@ -829,12 +813,6 @@ CREATE OR REPLACE PACKAGE BODY customer_mgmt AS
     SET EMAIL = p_new_email,
         EMAIL_VERIFIED = 0 -- Reset verification status
     WHERE ID = p_customer_id;
-
-    COMMIT;
-  EXCEPTION
-    WHEN OTHERS THEN
-      ROLLBACK;
-      RAISE;
   END update_email;
 END customer_mgmt;
 /
@@ -1065,11 +1043,11 @@ JOIN GENRES G ON B.GENRE_ID = G.ID
 GROUP BY C.ID, C.FIRST_NAME || ' ' || C.LAST_NAME, G.NAME;
 
 -- 15. Simple function to get book availability
-CREATE OR REPLACE FUNCTION is_book_available(p_book_id NUMBER)
+CREATE OR REPLACE FUNCTION is_book_available(p_book_id INT)
 RETURN VARCHAR2
 IS
-  v_quantity NUMBER;
-  v_is_available NUMBER;
+  v_quantity INT;
+  v_is_available INT;
 BEGIN
   SELECT QUANTITY, IS_AVAILABLE
   INTO v_quantity, v_is_available

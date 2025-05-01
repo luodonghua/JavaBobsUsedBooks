@@ -440,7 +440,7 @@ CREATE TABLE ORDER_HISTORY (
 CREATE OR REPLACE FUNCTION get_book_count_by_genre(p_genre_id NUMBER)
 RETURN NUMBER
 IS
-  v_count NUMBER;
+  v_count NUMBER(10,0);  -- Integer count with no decimal places
 BEGIN
   SELECT  /*+ FIRST_ROWS(10) */ 
     COUNT(*) INTO v_count
@@ -478,7 +478,7 @@ ORDER BY B.NAME;
 CREATE OR REPLACE FUNCTION calculate_order_total(p_order_id NUMBER)
 RETURN NUMBER
 IS
-  v_total NUMBER := 0;
+  v_total ORDER_ITEMS.BOOK_PRICE%TYPE := 0;  -- Using anchored declaration
 BEGIN
   SELECT SUM(OI.BOOK_PRICE * OI.QUANTITY - NVL(OI.DISCOUNT, 0))
   INTO v_total
@@ -497,7 +497,7 @@ CREATE OR REPLACE PROCEDURE process_book_offer(
   p_admin_id IN NUMBER
 )
 IS
-  v_book_id NUMBER;
+  v_book_id OFFERS.BOOK_ID%TYPE;
 BEGIN
   IF p_approved THEN
     -- Get offer details
@@ -586,11 +586,11 @@ END;
 CREATE OR REPLACE FUNCTION calculate_customer_loyalty_score(p_customer_id NUMBER)
 RETURN NUMBER
 IS
-  v_order_count NUMBER;
-  v_total_spent NUMBER;
-  v_days_since_first_order NUMBER;
-  v_days_since_last_order NUMBER;
-  v_loyalty_score NUMBER;
+  v_order_count NUMBER(10,0);
+  v_total_spent ORDERS.TOTAL_AMOUNT%TYPE;  -- Anchored to table column
+  v_days_since_first_order NUMBER(10,0);
+  v_days_since_last_order NUMBER(10,0);
+  v_loyalty_score NUMBER(10,2);
 BEGIN
   -- Get order statistics
   SELECT
@@ -933,7 +933,7 @@ CREATE OR REPLACE PACKAGE BODY order_processing AS
 
   -- Calculate order total
   FUNCTION get_order_total(p_order_id NUMBER) RETURN NUMBER IS
-    v_total NUMBER;
+    v_total ORDER_ITEMS.BOOK_PRICE%TYPE;
   BEGIN
     SELECT SUM(BOOK_PRICE * QUANTITY - NVL(DISCOUNT, 0))
     INTO v_total
@@ -1022,8 +1022,9 @@ GROUP BY C.ID, C.FIRST_NAME || ' ' || C.LAST_NAME, G.NAME;
 CREATE OR REPLACE FUNCTION is_book_available(p_book_id INT)
 RETURN VARCHAR2
 IS
-  v_quantity INT;
-  v_is_available INT;
+  -- Use anchored declarations to match table column types
+  v_quantity BOOKS.QUANTITY%TYPE;
+  v_is_available BOOKS.IS_AVAILABLE%TYPE;
 BEGIN
   SELECT QUANTITY, IS_AVAILABLE
   INTO v_quantity, v_is_available
@@ -1051,8 +1052,8 @@ CREATE OR REPLACE PROCEDURE add_to_cart(
   p_is_wishlist IN NUMBER DEFAULT 0
 )
 IS
-  v_cart_item_id NUMBER;
-  v_existing_quantity NUMBER;
+  v_cart_item_id SHOPPING_CART_ITEMS.ID%TYPE;
+  v_existing_quantity SHOPPING_CART_ITEMS.QUANTITY%TYPE;
 BEGIN
   -- Check if item already exists in cart
   BEGIN
@@ -1259,7 +1260,7 @@ CREATE OR REPLACE PROCEDURE update_book_quantity(
   p_quantity_change IN NUMBER
 ) AS
   PRAGMA AUTONOMOUS_TRANSACTION;
-  v_current_quantity NUMBER;
+  v_current_quantity BOOKS.QUANTITY%TYPE;
 BEGIN
   -- Get current quantity
   SELECT QUANTITY INTO v_current_quantity 
@@ -1300,8 +1301,8 @@ CREATE OR REPLACE FUNCTION check_book_availability(
   p_book_id IN NUMBER,
   p_quantity IN NUMBER
 ) RETURN BOOLEAN AS
-  v_available_quantity NUMBER;
-  v_book_name VARCHAR2(255);
+  v_available_quantity BOOKS.QUANTITY%TYPE;
+  v_book_name BOOKS.NAME%TYPE;
 BEGIN
   -- Get book information
   SELECT NAME, QUANTITY INTO v_book_name, v_available_quantity

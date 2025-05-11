@@ -2,132 +2,287 @@ package com.bobsusedbooks.demo;
 
 import com.bobsusedbooks.entities.Book;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.stereotype.Service;
+import org.springframework.stereotype.Repository;
 
 import javax.sql.DataSource;
 import java.math.BigDecimal;
-import java.sql.*;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 
 /**
- * This service class demonstrates Oracle-specific SQL statements embedded in Java code.
- * It's designed to showcase Amazon Q's SQL conversion capabilities using the /transform command.
+ * This class demonstrates embedded Oracle SQL statements in a Java application.
+ * It's designed to be a candidate for SQL conversion using Amazon Q's transform feature.
  * 
  * IMPORTANT: This class contains Oracle-specific SQL syntax that can be transformed
  * to PostgreSQL using Amazon Q's /transform command.
  */
-@Service
-public class OracleBookService {
-
+@Repository
+public class OracleBookRepository {
+    
     @Autowired
     private DataSource dataSource;
     
     /**
-     * Get book recommendations based on purchase history using Oracle-specific SQL
+     * Find books by genre using Oracle SQL
      */
-    public List<Book> getBookRecommendations(Long customerId) throws SQLException {
-        List<Book> recommendations = new ArrayList<>();
+    public List<Book> findBooksByGenre(Long genreId) throws SQLException {
+        List<Book> books = new ArrayList<>();
         
-        // Oracle-specific SQL with hierarchical query, analytic functions, and Oracle date functions
-        String sql = 
-            "WITH customer_genres AS (" +
-            "  SELECT b.genre_id, COUNT(*) as purchase_count " +
-            "  FROM orders o " +
-            "  JOIN order_items oi ON o.id = oi.order_id " +
-            "  JOIN books b ON oi.book_id = b.id " +
-            "  WHERE o.customer_id = ? " +
-            "  AND o.order_date > ADD_MONTHS(SYSDATE, -6) " +
-            "  GROUP BY b.genre_id " +
-            "  ORDER BY purchase_count DESC " +
-            "), " +
-            "purchased_books AS (" +
-            "  SELECT b.id " +
-            "  FROM orders o " +
-            "  JOIN order_items oi ON o.id = oi.order_id " +
-            "  JOIN books b ON oi.book_id = b.id " +
-            "  WHERE o.customer_id = ? " +
-            "), " +
-            "ranked_recommendations AS (" +
-            "  SELECT b.*, " +
-            "         ROW_NUMBER() OVER (PARTITION BY b.genre_id ORDER BY b.average_rating DESC NULLS LAST) as genre_rank " +
-            "  FROM books b " +
-            "  JOIN customer_genres cg ON b.genre_id = cg.genre_id " +
-            "  WHERE b.id NOT IN (SELECT id FROM purchased_books) " +
-            "  AND b.is_available = 1 " +
-            "  AND b.quantity > 0 " +
-            ") " +
-            "SELECT * FROM ranked_recommendations " +
-            "WHERE genre_rank <= 3 " +
-            "ORDER BY (SELECT purchase_count FROM customer_genres cg WHERE cg.genre_id = ranked_recommendations.genre_id) DESC, " +
-            "genre_rank ASC";
+        // Oracle-specific SQL with ROWNUM for pagination
+        String sql = "SELECT * FROM BOOKS b " +
+                     "WHERE b.genre_id = ? " +
+                     "AND ROWNUM <= 100 " +
+                     "ORDER BY b.name";
         
         try (Connection conn = dataSource.getConnection();
              PreparedStatement stmt = conn.prepareStatement(sql)) {
             
-            stmt.setLong(1, customerId);
-            stmt.setLong(2, customerId);
+            stmt.setLong(1, genreId);
             ResultSet rs = stmt.executeQuery();
             
             while (rs.next()) {
                 Book book = mapRowToBook(rs);
-                recommendations.add(book);
+                books.add(book);
             }
         }
         
-        return recommendations;
+        return books;
     }
-
     
     /**
-     * Get customer purchase patterns using Oracle-specific SQL
+     * Search books by keyword using Oracle SQL
      */
-    public List<Map<String, Object>> getCustomerPurchasePatterns(Long customerId) throws SQLException {
-        List<Map<String, Object>> results = new ArrayList<>();
+    public List<Book> searchBooks(String keyword) throws SQLException {
+        List<Book> books = new ArrayList<>();
         
-        // Oracle-specific SQL with analytic functions, LISTAGG, and Oracle date functions
-        String sql = 
-            "SELECT " +
-            "  c.id as customer_id, " +
-            "  c.name as customer_name, " +
-            "  COUNT(DISTINCT o.id) as total_orders, " +
-            "  SUM(o.total_amount) as total_spent, " +
-            "  AVG(o.total_amount) as avg_order_value, " +
-            "  MAX(o.order_date) as last_order_date, " +
-            "  ROUND(AVG(LEAD(o.order_date) OVER (PARTITION BY o.customer_id ORDER BY o.order_date) - o.order_date)) as avg_days_between_orders, " +
-            "  LISTAGG(DISTINCT g.name, ', ') WITHIN GROUP (ORDER BY COUNT(*) DESC) as top_genres, " +
-            "  ROUND(MONTHS_BETWEEN(SYSDATE, MIN(o.order_date))) as customer_age_months " +
-            "FROM customers c " +
-            "JOIN orders o ON c.id = o.customer_id " +
-            "JOIN order_items oi ON o.id = oi.order_id " +
-            "JOIN books b ON oi.book_id = b.id " +
-            "JOIN genres g ON b.genre_id = g.id " +
-            "WHERE c.id = ? " +
-            "GROUP BY c.id, c.name";
+        // Oracle-specific SQL with UPPER and concatenation operator ||
+        String sql = "SELECT * FROM BOOKS b " +
+                     "WHERE UPPER(b.name) LIKE UPPER('%' || ? || '%') " +
+                     "OR UPPER(b.author) LIKE UPPER('%' || ? || '%')";
         
         try (Connection conn = dataSource.getConnection();
              PreparedStatement stmt = conn.prepareStatement(sql)) {
             
-            stmt.setLong(1, customerId);
+            stmt.setString(1, keyword);
+            stmt.setString(2, keyword);
             ResultSet rs = stmt.executeQuery();
             
-            ResultSetMetaData metaData = rs.getMetaData();
-            int columnCount = metaData.getColumnCount();
-            
             while (rs.next()) {
-                Map<String, Object> row = new HashMap<>();
-                for (int i = 1; i <= columnCount; i++) {
-                    row.put(metaData.getColumnLabel(i), rs.getObject(i));
-                }
-                results.add(row);
+                Book book = mapRowToBook(rs);
+                books.add(book);
             }
         }
         
-        return results;
+        return books;
     }
     
+    /**
+     * Get featured books using Oracle SQL
+     */
+    public List<Book> getFeaturedBooks() throws SQLException {
+        List<Book> books = new ArrayList<>();
+        
+        // Oracle-specific SQL with NVL function
+        String sql = "SELECT * FROM BOOKS b " +
+                     "WHERE NVL(b.is_featured, 0) = 1 " +
+                     "ORDER BY b.name";
+        
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement stmt = conn.prepareStatement(sql)) {
+            
+            ResultSet rs = stmt.executeQuery();
+            
+            while (rs.next()) {
+                Book book = mapRowToBook(rs);
+                books.add(book);
+            }
+        }
+        
+        return books;
+    }
+    
+    /**
+     * Get books with low stock using Oracle SQL
+     */
+    public List<Book> getBooksWithLowStock(int threshold) throws SQLException {
+        List<Book> books = new ArrayList<>();
+        
+        // Oracle-specific SQL with DECODE function
+        String sql = "SELECT b.*, " +
+                     "DECODE(b.quantity, 0, 'Out of Stock', " +
+                     "                  1, 'Last Copy', " +
+                     "                  'In Stock') as stock_status " +
+                     "FROM BOOKS b " +
+                     "WHERE b.quantity < ? " +
+                     "ORDER BY b.quantity ASC";
+        
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement stmt = conn.prepareStatement(sql)) {
+            
+            stmt.setInt(1, threshold);
+            ResultSet rs = stmt.executeQuery();
+            
+            while (rs.next()) {
+                Book book = mapRowToBook(rs);
+                books.add(book);
+            }
+        }
+        
+        return books;
+    }
+    
+    
+    /**
+     * Advanced search for books using Oracle SQL
+     */
+    public List<Book> advancedSearch(
+            String keyword, 
+            String author, 
+            String isbn, 
+            Long publisherId, 
+            Long conditionId, 
+            Long bookTypeId, 
+            Long genreId, 
+            BigDecimal minPrice, 
+            BigDecimal maxPrice) throws SQLException {
+        
+        List<Book> books = new ArrayList<>();
+        
+        // Oracle-specific SQL with complex conditions and TO_DATE function
+        StringBuilder sql = new StringBuilder();
+        sql.append("SELECT * FROM BOOKS b WHERE 1=1 ");
+        
+        if (keyword != null) {
+            sql.append("AND (UPPER(b.name) LIKE UPPER('%' || ? || '%') OR UPPER(b.author) LIKE UPPER('%' || ? || '%')) ");
+        }
+        
+        if (author != null) {
+            sql.append("AND UPPER(b.author) LIKE UPPER('%' || ? || '%') ");
+        }
+        
+        if (isbn != null) {
+            sql.append("AND b.isbn LIKE '%' || ? || '%' ");
+        }
+        
+        if (publisherId != null) {
+            sql.append("AND b.publisher_id = ? ");
+        }
+        
+        if (conditionId != null) {
+            sql.append("AND b.condition_id = ? ");
+        }
+        
+        if (bookTypeId != null) {
+            sql.append("AND b.book_type_id = ? ");
+        }
+        
+        if (genreId != null) {
+            sql.append("AND b.genre_id = ? ");
+        }
+        
+        if (minPrice != null) {
+            sql.append("AND b.price >= ? ");
+        }
+        
+        if (maxPrice != null) {
+            sql.append("AND b.price <= ? ");
+        }
+        
+        sql.append("AND b.created_date > TO_DATE('2023-01-01', 'YYYY-MM-DD') ");
+        sql.append("ORDER BY b.name");
+        
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement stmt = conn.prepareStatement(sql.toString())) {
+            
+            int paramIndex = 1;
+            
+            if (keyword != null) {
+                stmt.setString(paramIndex++, keyword);
+                stmt.setString(paramIndex++, keyword);
+            }
+            
+            if (author != null) {
+                stmt.setString(paramIndex++, author);
+            }
+            
+            if (isbn != null) {
+                stmt.setString(paramIndex++, isbn);
+            }
+            
+            if (publisherId != null) {
+                stmt.setLong(paramIndex++, publisherId);
+            }
+            
+            if (conditionId != null) {
+                stmt.setLong(paramIndex++, conditionId);
+            }
+            
+            if (bookTypeId != null) {
+                stmt.setLong(paramIndex++, bookTypeId);
+            }
+            
+            if (genreId != null) {
+                stmt.setLong(paramIndex++, genreId);
+            }
+            
+            if (minPrice != null) {
+                stmt.setBigDecimal(paramIndex++, minPrice);
+            }
+            
+            if (maxPrice != null) {
+                stmt.setBigDecimal(paramIndex++, maxPrice);
+            }
+            
+            ResultSet rs = stmt.executeQuery();
+            
+            while (rs.next()) {
+                Book book = mapRowToBook(rs);
+                books.add(book);
+            }
+        }
+        
+        return books;
+    }
+    
+    /**
+     * Get top selling books using Oracle SQL
+     */
+    public List<Book> getTopSellingBooks(int limit) throws SQLException {
+        List<Book> books = new ArrayList<>();
+        
+        // Oracle-specific SQL with analytic functions
+        String sql = "SELECT b.* FROM (" +
+                     "  SELECT b.*, " +
+                     "         ROW_NUMBER() OVER (ORDER BY SUM(s.quantity) DESC) as rank " +
+                     "  FROM BOOKS b " +
+                     "  JOIN SALES s ON b.id = s.book_id " +
+                     "  WHERE s.sale_date > ADD_MONTHS(SYSDATE, -12) " +
+                     "  GROUP BY b.id, b.name, b.author, b.isbn, b.price, b.quantity, " +
+                     "           b.genre_id, b.publisher_id, b.condition_id, b.book_type_id, " +
+                     "           b.is_featured, b.is_bestseller, b.is_new_arrival, " +
+                     "           b.seller_id, b.is_available, b.created_by " +
+                     ") b " +
+                     "WHERE rank <= ?";
+        
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement stmt = conn.prepareStatement(sql)) {
+            
+            stmt.setInt(1, limit);
+            ResultSet rs = stmt.executeQuery();
+            
+            while (rs.next()) {
+                Book book = mapRowToBook(rs);
+                books.add(book);
+            }
+        }
+        
+        return books;
+    }
+   
     
     /**
      * Helper method to map a ResultSet row to a Book object

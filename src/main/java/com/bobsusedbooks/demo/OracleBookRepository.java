@@ -1,12 +1,3 @@
-/**
- * This class demonstrates embedded Oracle SQL statements in a Java application.
- * It's designed to be a candidate for SQL conversion using Amazon Q's transform feature.
- * 
- * IMPORTANT: This class contains Oracle-specific SQL syntax that can be transformed
- * to PostgreSQL using Amazon Q's /transform command.
- */
-
-
 package com.bobsusedbooks.demo;
 
 import com.bobsusedbooks.entities.Book;
@@ -22,7 +13,13 @@ import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
 
-
+/**
+ * This class demonstrates embedded Oracle SQL statements in a Java application.
+ * It's designed to be a candidate for SQL conversion using Amazon Q's transform feature.
+ * 
+ * IMPORTANT: This class contains Oracle-specific SQL syntax that can be transformed
+ * to PostgreSQL using Amazon Q's /transform command.
+ */
 @Repository
 public class OracleBookRepository {
     
@@ -138,37 +135,6 @@ public class OracleBookRepository {
         return books;
     }
     
-    /**
-     * Get total sales by genre using Oracle SQL
-     */
-    public List<Object[]> getTotalSalesByGenre() throws SQLException {
-        List<Object[]> results = new ArrayList<>();
-        
-        // Oracle-specific SQL with hierarchical query and CONNECT BY
-        String sql = "SELECT g.name, SUM(s.total_price) " +
-                     "FROM SALES s " +
-                     "JOIN BOOKS b ON s.book_id = b.id " +
-                     "JOIN GENRES g ON b.genre_id = g.id " +
-                     "CONNECT BY PRIOR g.parent_id = g.id " +
-                     "START WITH g.parent_id IS NULL " +
-                     "GROUP BY g.name " +
-                     "ORDER BY SUM(s.total_price) DESC";
-        
-        try (Connection conn = dataSource.getConnection();
-             PreparedStatement stmt = conn.prepareStatement(sql)) {
-            
-            ResultSet rs = stmt.executeQuery();
-            
-            while (rs.next()) {
-                Object[] row = new Object[2];
-                row[0] = rs.getString(1);
-                row[1] = rs.getBigDecimal(2);
-                results.add(row);
-            }
-        }
-        
-        return results;
-    }
     
     /**
      * Advanced search for books using Oracle SQL
@@ -316,50 +282,7 @@ public class OracleBookRepository {
         
         return books;
     }
-    
-    /**
-     * Get monthly sales report using Oracle SQL
-     */
-    public List<Object[]> getMonthlySalesReport(int year) throws SQLException {
-        List<Object[]> results = new ArrayList<>();
-        
-        // Oracle-specific SQL with date functions and pivot
-        String sql = "SELECT * FROM (" +
-                     "  SELECT " +
-                     "    TO_CHAR(s.sale_date, 'MONTH') as month, " +
-                     "    g.name as genre, " +
-                     "    SUM(s.total_price) as total " +
-                     "  FROM SALES s " +
-                     "  JOIN BOOKS b ON s.book_id = b.id " +
-                     "  JOIN GENRES g ON b.genre_id = g.id " +
-                     "  WHERE TO_CHAR(s.sale_date, 'YYYY') = ? " +
-                     "  GROUP BY TO_CHAR(s.sale_date, 'MONTH'), g.name " +
-                     ") " +
-                     "PIVOT ( " +
-                     "  SUM(total) " +
-                     "  FOR month IN ('JANUARY', 'FEBRUARY', 'MARCH', 'APRIL', 'MAY', 'JUNE', " +
-                     "               'JULY', 'AUGUST', 'SEPTEMBER', 'OCTOBER', 'NOVEMBER', 'DECEMBER') " +
-                     ") " +
-                     "ORDER BY genre";
-        
-        try (Connection conn = dataSource.getConnection();
-             PreparedStatement stmt = conn.prepareStatement(sql)) {
-            
-            stmt.setString(1, String.valueOf(year));
-            ResultSet rs = stmt.executeQuery();
-            
-            while (rs.next()) {
-                Object[] row = new Object[13]; // genre + 12 months
-                row[0] = rs.getString("genre");
-                for (int i = 1; i <= 12; i++) {
-                    row[i] = rs.getBigDecimal(i + 1); // +1 because genre is column 1
-                }
-                results.add(row);
-            }
-        }
-        
-        return results;
-    }
+   
     
     /**
      * Helper method to map a ResultSet row to a Book object
